@@ -2,9 +2,10 @@
 
 Dark Kitchen is a standalone TypeScript control plane for autonomous software teams.
 
-The repository is a small pnpm workspace with two initial boundaries:
+The repository is a small pnpm workspace with three initial boundaries:
 
 - `packages/core` — framework-neutral domain and port contracts.
+- `packages/process-execution` — shell-free process execution and typed payload/artifact transport.
 - `apps/api` — the future HTTP control-plane composition boundary.
 
 Architecture decisions and invariants are documented in [docs/architecture.md](docs/architecture.md).

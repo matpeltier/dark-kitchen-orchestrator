@@ -17,6 +17,7 @@ composition boundary in `apps/api`.
 | MCP               | Model and PM-facing access to Dark Kitchen capabilities                         | PM clients manage tracker work through Dark Kitchen MCP                                |
 | Workspace Manager | Repository checkout and task worktree lifecycle                                 | One primary Git worktree per active task                                               |
 | Persistence       | Durable control-plane state and history                                         | Storage behind a port, independent of a particular database                            |
+| Process Execution | Shell-free execution and payload transport                                      | Configured executables, bounded control arguments, stdin/stream/file payload channels  |
 
 Tracker providers are adapters: tracker-specific APIs never define the core domain model.
 GitHub is the initial SCM implementation, but GitHub is not a core requirement. SCM is
@@ -48,6 +49,31 @@ Adapters and infrastructure implement core ports; core does not import an adapte
 transport, tracker SDK, SCM SDK, database client, or channel implementation. The API exposes
 operational capabilities and composes these ports. Workflow execution, adapters, harnesses,
 notifications, and MCP tools are intentionally not implemented by this bootstrap.
+
+## Process execution and payload transport
+
+The process boundary has two deliberately separate channels:
+
+- Control metadata is small, bounded process configuration: an executable path, identifiers,
+  safe artifact paths, flags, and enum values. It is passed as an executable plus an argument
+  array through `@dark-kitchen/process-execution`.
+- Payload data is arbitrary or potentially large: tracker bodies, prompts, agent outputs, human
+  replies, diffs, JSON/config fragments, and structured context. It must travel through the typed
+  payload transport as stdin, a stream, or a referenced file artifact. It must never be
+  interpolated into a shell command string, executable definition, or CLI argument vector.
+
+`defineProcess` keeps the configured executable and explicitly trusted, bounded arguments separate
+from each `ProcessInvocation` payload. The shared executor uses `spawn` with `shell: false`, closes
+stdin when there is no stdin payload, and exposes stdout/stderr only as programmatic result data.
+File payloads expose only `DARK_KITCHEN_PAYLOAD_FILE`, a bounded path reference, to the child
+process. ACP/acpx and native/custom process launch profiles both construct invocations using this
+same transport boundary.
+
+Shell execution is an exceptional compatibility escape hatch. It requires an explicit
+`allowExceptionalShell` policy and a separately defined `trustedShellCommand`; runtime shell
+invocations carry only that definition and an optional signal, with no payload parameter. Runtime
+diagnostics contain process metadata and payload kind/size only; they must not log complete payload
+contents.
 
 ## Invariants
 

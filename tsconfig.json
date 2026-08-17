@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
+    { "path": "./packages/process-execution" },
     { "path": "./packages/adapter-contract-fixture" },
     { "path": "./apps/api" }
   ]
