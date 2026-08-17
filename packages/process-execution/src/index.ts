@@ -32,7 +32,7 @@ export type ControlArgument = string & { readonly [controlArgumentBrand]: true }
 
 export interface ProcessDefinitionInput {
   readonly executable: string;
-  readonly args?: readonly string[];
+  readonly args?: readonly ControlArgument[];
   readonly label?: string;
 }
 
@@ -74,12 +74,7 @@ export function defineProcess(input: ProcessDefinitionInput): ProcessDefinition 
   if (input.args !== undefined && !Array.isArray(input.args)) {
     throw new TypeError('Process arguments must be an array');
   }
-  const args = (input.args ?? []).map((arg, index) => {
-    if (typeof arg !== 'string') {
-      throw new TypeError(`Process argument ${index} must be a string`);
-    }
-    return controlArgument(arg);
-  });
+  const args = [...(input.args ?? [])];
   validateArgumentVector(args);
 
   if (input.label === undefined) {
@@ -293,20 +288,25 @@ function emitDiagnostic(invocation: ProcessInvocation, diagnostic: ProcessDiagno
   invocation.onDiagnostic?.(diagnostic);
 }
 
-function finishStdin(payload: PayloadTransport | undefined, stdin: Writable): void {
+function finishStdin(
+  payload: PayloadTransport | undefined,
+  stdin: Writable,
+  onSourceError: (error: unknown) => void,
+): Readable | undefined {
   if (payload?.kind === 'stdin') {
     stdin.end(Buffer.from(payload.bytes));
-    return;
+    return undefined;
   }
 
   if (payload?.kind === 'stream') {
-    payload.stream.on('error', (error) => stdin.destroy(error));
+    payload.stream.on('error', onSourceError);
     payload.stream.pipe(stdin);
-    return;
+    return payload.stream;
   }
 
   // A file payload is referenced through an environment path. It has no stdin data.
   stdin.end();
+  return undefined;
 }
 
 /**
@@ -370,29 +370,63 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
 
   return new Promise<ProcessResult>((resolve, reject) => {
     let settled = false;
-    const fail = (error: unknown): void => {
+    let stdinCompleted = false;
+    let sourceStream: Readable | undefined;
+
+    const cleanup = (): void => {
+      if (sourceStream !== undefined) {
+        sourceStream.unpipe(childStdin);
+        if (!sourceStream.destroyed) {
+          sourceStream.destroy();
+        }
+      }
+      if (!childStdin.destroyed) {
+        childStdin.destroy();
+      }
+      if (!child.killed) {
+        child.kill();
+      }
+    };
+
+    const fail = (error: unknown, message?: string): void => {
       if (settled) {
         return;
       }
       settled = true;
+      cleanup();
       reject(
         error instanceof ProcessExecutionError
           ? error
           : new ProcessExecutionError(
-              `Unable to launch process ${invocation.definition.executable}`,
+              message ?? `Unable to launch process ${invocation.definition.executable}`,
               error,
             ),
       );
     };
 
     child.once('error', fail);
+    childStdin.on('error', (error) => fail(error, 'Process stdin failed'));
+    childStdin.once('finish', () => {
+      stdinCompleted = true;
+    });
+    childStdin.once('close', () => {
+      if (!stdinCompleted) {
+        fail(new ProcessExecutionError('Process stdin closed before the payload completed'));
+      }
+    });
     childStdout.on('data', (chunk: Buffer | string) => stdout.push(Buffer.from(chunk)));
     childStderr.on('data', (chunk: Buffer | string) => stderr.push(Buffer.from(chunk)));
     childStdout.once('error', fail);
     childStderr.once('error', fail);
 
     try {
-      finishStdin(payload, childStdin);
+      if (payload?.kind === 'stream') {
+        sourceStream = payload.stream;
+      }
+      sourceStream =
+        finishStdin(payload, childStdin, (error) => {
+          fail(error, 'Process stdin source failed');
+        }) ?? sourceStream;
     } catch (error) {
       fail(error);
       return;
@@ -400,6 +434,10 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
 
     child.once('close', (exitCode, signal) => {
       if (settled) {
+        return;
+      }
+      if (!stdinCompleted) {
+        fail(new ProcessExecutionError('Process exited before the payload completed'));
         return;
       }
       settled = true;
@@ -432,32 +470,72 @@ export function allowExceptionalShell(reason: string): ExceptionalShellPolicy {
   return Object.freeze({ kind: 'exceptional-shell-execution', reason });
 }
 
-export interface ExceptionalShellInvocation {
-  readonly command: string;
+declare const trustedShellCommandBrand: unique symbol;
+
+/** A shell command trusted at configuration time, never supplied by a runtime invocation. */
+export type TrustedShellCommand = string & {
+  readonly [trustedShellCommandBrand]: true;
+};
+
+export function trustedShellCommand(command: string): TrustedShellCommand {
+  assertControlValue(command, 'Trusted shell command');
+  return command as TrustedShellCommand;
+}
+
+export interface ExceptionalShellDefinitionInput {
+  readonly command: TrustedShellCommand;
   readonly policy: ExceptionalShellPolicy;
   readonly cwd?: string;
+}
+
+export interface ExceptionalShellDefinition {
+  readonly command: TrustedShellCommand;
+  readonly policy: ExceptionalShellPolicy;
+  readonly cwd?: string;
+}
+
+/** Defines the exceptional shell command once, at the trusted configuration boundary. */
+export function defineExceptionalShell(
+  input: ExceptionalShellDefinitionInput,
+): ExceptionalShellDefinition {
+  if (input.policy.kind !== 'exceptional-shell-execution') {
+    throw new TypeError('An explicit exceptional shell-execution policy is required');
+  }
+  assertControlValue(input.command, 'Trusted shell command');
+  if (input.cwd !== undefined) {
+    assertControlValue(input.cwd, 'Working directory');
+  }
+  return Object.freeze({ ...input });
+}
+
+export interface ExceptionalShellInvocation {
+  readonly definition: ExceptionalShellDefinition;
   readonly signal?: AbortSignal;
 }
 
 /**
  * Exceptional escape hatch for a trusted, preconfigured shell command. There is intentionally no
- * payload field or argv data parameter, so callers cannot pass runtime payloads to this API.
+ * command or payload field on the runtime invocation, so callers cannot pass runtime data to this
+ * API.
  */
 export function executeExceptionalShell(
   invocation: ExceptionalShellInvocation,
 ): Promise<ProcessResult> {
-  if (invocation.policy.kind !== 'exceptional-shell-execution') {
-    throw new TypeError('An explicit exceptional shell-execution policy is required');
+  const definition = invocation.definition;
+  if (
+    definition === undefined ||
+    definition === null ||
+    definition.policy?.kind !== 'exceptional-shell-execution'
+  ) {
+    throw new TypeError('An exceptional shell definition with an explicit policy is required');
   }
-  if (typeof invocation.command !== 'string' || invocation.command.length === 0) {
-    throw new TypeError('Shell command must be a non-empty trusted configuration string');
-  }
-  if (invocation.cwd !== undefined) {
-    assertControlValue(invocation.cwd, 'Working directory');
+  assertControlValue(definition.command, 'Trusted shell command');
+  if (definition.cwd !== undefined) {
+    assertControlValue(definition.cwd, 'Working directory');
   }
 
-  const child = spawn(invocation.command, {
-    cwd: invocation.cwd,
+  const child = spawn(definition.command, {
+    cwd: definition.cwd,
     shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,

@@ -62,17 +62,18 @@ The process boundary has two deliberately separate channels:
   payload transport as stdin, a stream, or a referenced file artifact. It must never be
   interpolated into a shell command string, executable definition, or CLI argument vector.
 
-`defineProcess` keeps the configured executable and bounded arguments separate from each
-`ProcessInvocation` payload. The shared executor uses `spawn` with `shell: false`, closes stdin
-when there is no stdin payload, and exposes stdout/stderr only as programmatic result data. File
-payloads expose only `DARK_KITCHEN_PAYLOAD_FILE`, a bounded path reference, to the child process.
-ACP/acpx and native/custom process launch profiles both construct invocations using this same
-transport boundary.
+`defineProcess` keeps the configured executable and explicitly trusted, bounded arguments separate
+from each `ProcessInvocation` payload. The shared executor uses `spawn` with `shell: false`, closes
+stdin when there is no stdin payload, and exposes stdout/stderr only as programmatic result data.
+File payloads expose only `DARK_KITCHEN_PAYLOAD_FILE`, a bounded path reference, to the child
+process. ACP/acpx and native/custom process launch profiles both construct invocations using this
+same transport boundary.
 
 Shell execution is an exceptional compatibility escape hatch. It requires an explicit
-`allowExceptionalShell` policy, accepts only a trusted configured shell command, and has no
-payload parameter. Runtime diagnostics contain process metadata and payload kind/size only; they
-must not log complete payload contents.
+`allowExceptionalShell` policy and a separately defined `trustedShellCommand`; runtime shell
+invocations carry only that definition and an optional signal, with no payload parameter. Runtime
+diagnostics contain process metadata and payload kind/size only; they must not log complete payload
+contents.
 
 ## Invariants
 
