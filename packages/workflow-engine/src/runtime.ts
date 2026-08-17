@@ -58,6 +58,8 @@ const logicalExecution = new AsyncLocalStorage<LogicalExecutionContext>();
 
 interface NestedInvocation {
   readonly position: LogicalPosition;
+  /** Identity is reserved synchronously, before any resolver or preparation can complete. */
+  readonly identity: string;
   readonly ready: Promise<void>;
   readonly markReady: () => void;
   childName?: string;
@@ -395,41 +397,51 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
             );
           if (!options.resolveWorkflow)
             throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
-          const resolved = await options.resolveWorkflow(
-            resolveWorkflowRef(toWorkflowRef(ref), basePath),
+          const resolved = await abortable(
+            Promise.resolve().then(() =>
+              options.resolveWorkflow!(resolveWorkflowRef(toWorkflowRef(ref), basePath)),
+            ),
+            signal,
           );
           throwIfAborted(options.signal, signal);
           const parsed = parseWorkflowScript(resolved.script);
           const childName = resolved.name ?? parsed.meta.name;
           invocation.childName = childName;
 
-          // A logical branch owns its position even when its async work arrives later.
-          // Wait for all logically earlier calls to publish their canonical names before
-          // assigning this call's suffix.
-          await Promise.all(
-            nestedInvocations.entries
-              .filter((entry) => compareLogicalPositions(entry.position, invocation.position) < 0)
-              .map((entry) => entry.ready),
+          // Wait for logically earlier invocations to publish their canonical names before
+          // assigning the human-readable occurrence suffix. The journal identity below is
+          // always based on the reserved logical position, so this ordering cannot affect
+          // replay keys when parallel preparation reaches workflow() out of order.
+          await abortable(
+            Promise.all(
+              nestedInvocations.entries
+                .filter((entry) => compareLogicalPositions(entry.position, invocation.position) < 0)
+                .map((entry) => entry.ready),
+            ),
+            signal,
           );
-          await Promise.all(predecessors);
-          throwIfAborted(options.signal, signal);
+          await abortable(Promise.all(predecessors), signal);
           const occurrence = nestedInvocations.entries.filter(
             (entry) =>
               entry.childName === childName &&
               compareLogicalPositions(entry.position, invocation.position) <= 0,
           ).length;
+          throwIfAborted(options.signal, signal);
           invocation.markReady();
           throwIfAborted(options.signal, signal);
 
-          return executeWorkflow(
-            parsed.body,
-            parsed.meta,
-            context,
-            args,
-            `${parentPath}/${encodeWorkflowPathComponent(childName)}${occurrence === 1 ? '' : `#${occurrence}`}`,
-            `${parentIdentityPath}/${encodeWorkflowPathComponent(childName)}@${logicalPositionKey(position)}`,
-            depth + 1,
-            resolved.basePath ?? context.options.cwd ?? process.cwd(),
+          return await abortable(
+            executeWorkflow(
+              parsed.body,
+              parsed.meta,
+              context,
+              args,
+              `${parentPath}/${encodeWorkflowPathComponent(childName)}${occurrence === 1 ? '' : `#${occurrence}`}`,
+              `${parentIdentityPath}/${encodeWorkflowPathComponent(childName)}@${invocation.identity}`,
+              depth + 1,
+              resolved.basePath ?? context.options.cwd ?? process.cwd(),
+            ),
+            signal,
           );
         } finally {
           invocation.markReady();
@@ -850,6 +862,7 @@ function reserveNestedInvocation(
   let markedReady = false;
   const invocation: NestedInvocation = {
     position,
+    identity: logicalPositionKey(position),
     ready,
     markReady: () => {
       if (markedReady) return;
