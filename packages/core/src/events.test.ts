@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { createAgentSessionId, createEventId } from './index.js';
-import type { AgentSessionCompletedEvent, AgentSessionStateChangedEvent } from './index.js';
+import { createAgentSessionId, createEventId, validateDomainEvent } from './index.js';
+import type {
+  AgentSessionCompletedEvent,
+  AgentSessionStateChangedEvent,
+  DomainEvent,
+} from './index.js';
 
 const agentSessionId = createAgentSessionId('agent-1');
 const timestamp = '2026-08-17T00:00:00.000Z';
@@ -32,5 +36,9 @@ describe('agent session events', () => {
       payload: { agentSessionId, state: 'interrupted' },
     };
     expect(invalidCompleted).toBeDefined();
+
+    expect(() => validateDomainEvent(invalidCompleted as unknown as DomainEvent)).toThrow(
+      'must describe a terminal runtime state',
+    );
   });
 });

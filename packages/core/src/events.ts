@@ -1,3 +1,9 @@
+import {
+  DomainValidationError,
+  canTransitionAgentSession,
+  canTransitionRun,
+  isTerminalRuntimeState,
+} from './domain.js';
 import type {
   AgentSessionId,
   AgentSessionState,
@@ -132,3 +138,37 @@ export type DomainEvent =
 export type DomainEventType = DomainEvent['type'];
 export type DomainEventOfType<Type extends DomainEventType> = Extract<DomainEvent, { type: Type }>;
 export type DomainEventPayload<Type extends DomainEventType> = DomainEventOfType<Type>['payload'];
+
+/** Validates runtime invariants that cannot be expressed by event discriminants alone. */
+export function validateDomainEvent(event: DomainEvent): void {
+  if (event.id.trim().length === 0 || event.occurredAt.trim().length === 0) {
+    throw new DomainValidationError('Domain events require an ID and occurrence timestamp.');
+  }
+
+  switch (event.type) {
+    case 'agent.state-changed':
+      if (!canTransitionAgentSession(event.payload.previousState, event.payload.state)) {
+        throw new DomainValidationError(
+          `Agent session events must describe legal state transitions: ${event.payload.previousState} -> ${event.payload.state}.`,
+        );
+      }
+      return;
+    case 'agent.completed':
+    case 'run.completed':
+      if (!isTerminalRuntimeState(event.payload.state)) {
+        throw new DomainValidationError(
+          `${event.type} events must describe a terminal runtime state, not ${event.payload.state}.`,
+        );
+      }
+      return;
+    case 'run.state-changed':
+      if (!canTransitionRun(event.payload.previousState, event.payload.state)) {
+        throw new DomainValidationError(
+          `Run events must describe legal state transitions: ${event.payload.previousState} -> ${event.payload.state}.`,
+        );
+      }
+      return;
+    default:
+      return;
+  }
+}

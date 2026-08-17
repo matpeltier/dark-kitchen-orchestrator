@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import {
   createAgentSessionId,
@@ -125,6 +128,29 @@ describe('domain validation', () => {
         ],
       ),
     ).toThrow('shared by multiple tasks');
+  });
+
+  it('compares physical paths when an uncreated worktree is under a symlink', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dark-kitchen-worktree-'));
+    const realRoot = join(root, 'real');
+    const symlinkRoot = join(root, 'linked');
+
+    try {
+      mkdirSync(realRoot);
+      symlinkSync(realRoot, symlinkRoot, 'dir');
+
+      expect(() =>
+        validatePrimaryWorktreeInvariant(
+          [taskA, taskB],
+          [
+            { ...workspace('workspace-a', taskA), path: join(realRoot, 'future') },
+            { ...workspace('workspace-b', taskB), path: join(symlinkRoot, 'future') },
+          ],
+        ),
+      ).toThrow('shared by multiple tasks');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
