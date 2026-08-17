@@ -1,6 +1,7 @@
 import type {
   AgentSession,
   AgentSessionId,
+  Branch,
   ChannelAddress,
   ChannelGateway,
   ChannelMessage,
@@ -27,6 +28,7 @@ import type {
   ProjectId,
   PullRequest,
   PullRequestId,
+  PushBranchInput,
   Repository,
   RepositoryId,
   Run,
@@ -47,6 +49,8 @@ import type {
   Workspace,
   WorkspaceId,
   WorkspaceManager,
+  WaitForChecksInput,
+  MergePullRequestInput,
 } from '@dark-kitchen/core';
 
 function unavailable(operation: string, ...argumentsToIgnore: readonly unknown[]): never {
@@ -85,6 +89,18 @@ export class ContractScmAdapter implements ScmAdapter {
     return unavailable('scm.getRepository', _reference);
   }
 
+  public async getDefaultBranch(_repositoryId: RepositoryId): Promise<string> {
+    return unavailable('scm.getDefaultBranch', _repositoryId);
+  }
+
+  public async getRemoteUrl(_repositoryId: RepositoryId): Promise<string> {
+    return unavailable('scm.getRemoteUrl', _repositoryId);
+  }
+
+  public async pushBranch(_input: PushBranchInput): Promise<Branch> {
+    return unavailable('scm.pushBranch', _input);
+  }
+
   public async getPullRequest(
     _repositoryId: RepositoryId,
     _pullRequestId: PullRequestId,
@@ -98,6 +114,18 @@ export class ContractScmAdapter implements ScmAdapter {
 
   public async listChecks(_pullRequestId: PullRequestId): Promise<readonly Check[]> {
     return unavailable('scm.listChecks', _pullRequestId);
+  }
+
+  public async waitForChecks(_input: WaitForChecksInput): Promise<readonly Check[]> {
+    return unavailable('scm.waitForChecks', _input);
+  }
+
+  public async mergePullRequest(_input: MergePullRequestInput): Promise<PullRequest> {
+    return unavailable('scm.mergePullRequest', _input);
+  }
+
+  public async verifyPullRequestMerged(_pullRequestId: PullRequestId): Promise<boolean> {
+    return unavailable('scm.verifyPullRequestMerged', _pullRequestId);
   }
 }
 

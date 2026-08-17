@@ -200,6 +200,8 @@ export interface Repository {
   readonly name: string;
   readonly reference: ScmReference;
   readonly defaultBranch: string;
+  /** The clone/push remote discovered from the provider. */
+  readonly remoteUrl?: string;
 }
 
 export type PullRequestStatus = 'open' | 'merged' | 'closed';
@@ -214,7 +216,18 @@ export interface PullRequest {
   readonly targetBranch: string;
   readonly reference: ScmReference;
   readonly url?: string;
+  readonly headSha?: string;
+  readonly baseSha?: string;
+  readonly mergeCommitSha?: string;
 }
+
+export interface Branch {
+  readonly repositoryId: RepositoryId;
+  readonly name: string;
+  readonly commitSha: string;
+}
+
+export type MergeStrategy = 'merge' | 'squash' | 'rebase';
 
 export type CheckStatus = 'queued' | 'running' | 'passed' | 'failed' | 'cancelled';
 

@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/core" },
     { "path": "./packages/adapter-contract-fixture" },
+    { "path": "./packages/scm-github" },
     { "path": "./apps/api" }
   ]
 }

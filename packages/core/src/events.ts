@@ -7,6 +7,7 @@ import {
 import type {
   AgentSessionId,
   AgentSessionState,
+  Branch,
   CheckId,
   CheckStatus,
   ConfigurationId,
@@ -14,6 +15,7 @@ import type {
   Intervention,
   InterventionId,
   InterventionStatus,
+  MergeStrategy,
   PullRequest,
   PullRequestId,
   PullRequestStatus,
@@ -102,6 +104,25 @@ export type PullRequestStateChangedEvent = TypedDomainEvent<
   }
 >;
 
+export type ScmBranchPushedEvent = TypedDomainEvent<
+  'scm.branch-pushed',
+  { readonly branch: Branch }
+>;
+
+export type PullRequestCreatedEvent = TypedDomainEvent<
+  'pull-request.created',
+  { readonly pullRequest: PullRequest }
+>;
+
+export type PullRequestMergedEvent = TypedDomainEvent<
+  'pull-request.merged',
+  {
+    readonly pullRequestId: PullRequestId;
+    readonly strategy: MergeStrategy;
+    readonly mergeCommitSha?: string;
+  }
+>;
+
 export type CheckStateChangedEvent = TypedDomainEvent<
   'check.state-changed',
   {
@@ -131,13 +152,23 @@ export type DomainEvent =
   | AgentSessionCompletedEvent
   | InterventionCreatedEvent
   | InterventionStateChangedEvent
+  | ScmBranchPushedEvent
+  | PullRequestCreatedEvent
   | PullRequestStateChangedEvent
+  | PullRequestMergedEvent
   | CheckStateChangedEvent
   | ConfigurationChangedEvent;
 
 export type DomainEventType = DomainEvent['type'];
 export type DomainEventOfType<Type extends DomainEventType> = Extract<DomainEvent, { type: Type }>;
 export type DomainEventPayload<Type extends DomainEventType> = DomainEventOfType<Type>['payload'];
+
+export type ScmEvent =
+  | ScmBranchPushedEvent
+  | PullRequestCreatedEvent
+  | PullRequestStateChangedEvent
+  | PullRequestMergedEvent
+  | CheckStateChangedEvent;
 
 /** Validates runtime invariants that cannot be expressed by event discriminants alone. */
 export function validateDomainEvent(event: DomainEvent): void {
