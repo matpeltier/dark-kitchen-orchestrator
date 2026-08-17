@@ -10,6 +10,7 @@ import { createRepositoryId, createTaskId } from '@dark-kitchen/core';
 import {
   GitHubApiError,
   GitHubScmAdapter,
+  RequiredChecksTimeoutError,
   buildGitHubPullRequestContent,
   pushGitBranch,
 } from './index.js';
@@ -36,6 +37,13 @@ class GitHubApiFixture implements GitHubApiClient {
   public merged = false;
   public checkConclusion = 'success';
   public checkStatus = 'completed';
+  public includeCheckRun = true;
+  public statuses: readonly {
+    readonly id: number;
+    readonly context: string;
+    readonly state: string;
+    readonly target_url?: string;
+  }[] = [];
   public headSha = 'head-sha';
   public changeHeadWhenChecksAreRead = false;
   public remoteUrl = 'https://github.com/acme/kitchen.git';
@@ -81,19 +89,21 @@ class GitHubApiFixture implements GitHubApiClient {
         this.headSha = 'changed-sha';
       }
       return {
-        check_runs: [
-          {
-            id: 7,
-            name: 'CI',
-            status: this.checkStatus,
-            conclusion: this.checkConclusion,
-            details_url: 'https://github.com/acme/kitchen/actions/runs/7',
-          },
-        ],
+        check_runs: this.includeCheckRun
+          ? [
+              {
+                id: 7,
+                name: 'CI',
+                status: this.checkStatus,
+                conclusion: this.checkConclusion,
+                details_url: 'https://github.com/acme/kitchen/actions/runs/7',
+              },
+            ]
+          : [],
       } as T;
     }
     if (path.includes('/status')) {
-      return { statuses: [] } as T;
+      return { statuses: this.statuses } as T;
     }
     throw new Error(`Unhandled fixture request: ${init.method ?? 'GET'} ${path}`);
   }
@@ -112,7 +122,7 @@ class GitHubApiFixture implements GitHubApiClient {
   }
 }
 
-const repositoryId = createRepositoryId('acme/kitchen');
+const opaqueRepositoryId = createRepositoryId('repository-01HRQX7E8W9KFAKEOPAQUE');
 
 describe('GitHub SCM adapter', () => {
   it('pushes a branch, creates a task-linked PR, waits for checks, and verifies a merge', async () => {
@@ -140,6 +150,8 @@ describe('GitHub SCM adapter', () => {
     });
 
     const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    expect(repository.id).toBe('scm:github:repository:acme/kitchen');
+    expect(repository.id).not.toBe(repository.reference.id);
     expect(repository.defaultBranch).toBe('main');
     expect(await adapter.getRemoteUrl(repository.id)).toBe('https://github.com/acme/kitchen.git');
 
@@ -174,7 +186,8 @@ describe('GitHub SCM adapter', () => {
         },
       },
     });
-    expect(pullRequest.id).toBe('acme/kitchen#1');
+    expect(pullRequest.id).toBe('scm:github:pull-request:acme/kitchen#1');
+    expect(pullRequest.id).not.toBe(pullRequest.reference.id);
     expect(pullRequest.url).toBe('https://github.com/acme/kitchen/pull/1');
 
     const merged = await adapter.mergePullRequest({
@@ -380,6 +393,24 @@ describe('GitHub SCM adapter', () => {
     );
   });
 
+  it('validates branch names at the Git push boundary', async () => {
+    const runGit: GitHubGitExecutor = async () => ({ stdout: `${'a'.repeat(40)}\n`, stderr: '' });
+
+    await expect(
+      pushGitBranch(
+        {
+          remoteUrl: 'https://github.com/acme/kitchen.git',
+          branch: 'feature/../unsafe',
+          commitSha: 'a'.repeat(40),
+          worktreePath: '/tmp/task-worktree',
+          force: false,
+        },
+        { token: undefined },
+        runGit,
+      ),
+    ).rejects.toThrow('Invalid GitHub branch name');
+  });
+
   it('does not reuse branch-pushed event IDs across adapter instances', async () => {
     const api = new GitHubApiFixture();
     const eventIds: string[] = [];
@@ -424,9 +455,9 @@ describe('GitHub SCM adapter', () => {
     const api = new GitHubApiFixture();
     api.checkConclusion = 'failure';
     const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
-    await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
     const pullRequest = await adapter.createPullRequest({
-      repositoryId,
+      repositoryId: repository.id,
       sourceBranch: 'feature/task-1',
       targetBranch: 'main',
       title: 'Failed checks',
@@ -438,13 +469,41 @@ describe('GitHub SCM adapter', () => {
     expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
   });
 
+  it('pessimistically combines same-named check runs and commit statuses', async () => {
+    const api = new GitHubApiFixture();
+    api.statuses = [
+      {
+        id: 8,
+        context: 'CI',
+        state: 'failure',
+        target_url: 'https://github.com/acme/kitchen/statuses/8',
+      },
+    ];
+    const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Colliding checks',
+    });
+
+    await expect(adapter.listChecks(pullRequest.id)).resolves.toMatchObject([
+      { name: 'CI', status: 'failed' },
+    ]);
+    await expect(adapter.mergePullRequest({ pullRequestId: pullRequest.id })).rejects.toThrow(
+      'Required checks failed: CI.',
+    );
+    expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
   it('refuses a merge when required checks remain pending beyond policy', async () => {
     const api = new GitHubApiFixture();
     api.checkStatus = 'in_progress';
     const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
-    await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
     const pullRequest = await adapter.createPullRequest({
-      repositoryId,
+      repositoryId: repository.id,
       sourceBranch: 'feature/task-1',
       targetBranch: 'main',
       title: 'Pending checks',
@@ -456,13 +515,41 @@ describe('GitHub SCM adapter', () => {
     expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
   });
 
+  it('reports an absent required check explicitly when the check policy times out', async () => {
+    const api = new GitHubApiFixture();
+    api.includeCheckRun = false;
+    const adapter = new GitHubScmAdapter({
+      api,
+      requiredChecks: ['CI'],
+      checkTimeoutMs: 0,
+    });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Absent check',
+    });
+
+    let timeoutError: unknown;
+    try {
+      await adapter.waitForChecks({ pullRequestId: pullRequest.id });
+    } catch (error) {
+      timeoutError = error;
+    }
+
+    expect(timeoutError).toBeInstanceOf(RequiredChecksTimeoutError);
+    expect(timeoutError).toMatchObject({ checks: [], missingChecks: ['CI'] });
+    expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
   it('refuses a merge if the pull request head changes while checks are observed', async () => {
     const api = new GitHubApiFixture();
     api.changeHeadWhenChecksAreRead = true;
     const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'] });
-    await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
     const pullRequest = await adapter.createPullRequest({
-      repositoryId,
+      repositoryId: repository.id,
       sourceBranch: 'feature/task-1',
       targetBranch: 'main',
       title: 'Changed head',
@@ -477,9 +564,9 @@ describe('GitHub SCM adapter', () => {
   it('refuses a merge strategy that differs from the configured policy', async () => {
     const api = new GitHubApiFixture();
     const adapter = new GitHubScmAdapter({ api, mergeStrategy: 'squash' });
-    await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
     const pullRequest = await adapter.createPullRequest({
-      repositoryId,
+      repositoryId: repository.id,
       sourceBranch: 'feature/task-1',
       targetBranch: 'main',
       title: 'Policy check',
@@ -493,7 +580,7 @@ describe('GitHub SCM adapter', () => {
 
   it('links an external tracker task without GitHub close syntax', () => {
     const content = buildGitHubPullRequestContent({
-      repositoryId,
+      repositoryId: opaqueRepositoryId,
       sourceBranch: 'feature/task-1',
       targetBranch: 'main',
       task: {
@@ -514,7 +601,7 @@ describe('GitHub SCM adapter', () => {
 
   it('qualifies a cross-repository GitHub tracker issue in close syntax', () => {
     const content = buildGitHubPullRequestContent({
-      repositoryId,
+      repositoryId: opaqueRepositoryId,
       sourceBranch: 'feature/task-1',
       targetBranch: 'main',
       task: {
@@ -533,16 +620,19 @@ describe('GitHub SCM adapter', () => {
   });
 
   it('qualifies a same-repository GitHub tracker issue when only its number is normalized', () => {
-    const content = buildGitHubPullRequestContent({
-      repositoryId,
-      sourceBranch: 'feature/task-1',
-      targetBranch: 'main',
-      task: {
-        taskId: createTaskId('42'),
-        title: 'Link the local issue',
-        trackerReference: { provider: 'github', id: '#42' },
+    const content = buildGitHubPullRequestContent(
+      {
+        repositoryId: opaqueRepositoryId,
+        sourceBranch: 'feature/task-1',
+        targetBranch: 'main',
+        task: {
+          taskId: createTaskId('42'),
+          title: 'Link the local issue',
+          trackerReference: { provider: 'github', id: '#42' },
+        },
       },
-    });
+      { provider: 'github', id: 'acme/kitchen' },
+    );
 
     expect(content.body).toContain('Closes acme/kitchen#42');
   });

@@ -162,6 +162,7 @@ export class RequiredChecksTimeoutError extends ScmMergeError {
   public constructor(
     public readonly checks: readonly Check[],
     timeoutMs: number,
+    public readonly missingChecks: readonly string[] = [],
   ) {
     super(`Required checks did not pass within ${timeoutMs}ms.`);
     this.name = 'RequiredChecksTimeoutError';
@@ -233,7 +234,10 @@ export class GitHubHttpClient implements GitHubApiClient {
  * reference is linked as data; GitHub close syntax is emitted only for a
  * GitHub Issues tracker with a resolvable issue number and repository.
  */
-export function buildGitHubPullRequestContent(input: CreatePullRequestInput): {
+export function buildGitHubPullRequestContent(
+  input: CreatePullRequestInput,
+  repositoryReference?: ScmReference,
+): {
   readonly title: string;
   readonly body?: string;
 } {
@@ -257,7 +261,11 @@ export function buildGitHubPullRequestContent(input: CreatePullRequestInput): {
 
   if (tracker?.provider.toLowerCase() === 'github') {
     const issue = githubIssueReference(tracker);
-    const repository = issue?.repository ?? githubRepositoryName(String(input.repositoryId));
+    const repository =
+      issue?.repository ??
+      (repositoryReference?.provider.toLowerCase() === 'github'
+        ? githubRepositoryName(repositoryReference.id)
+        : undefined);
     if (issue !== undefined && repository !== undefined) {
       lines.push(`Closes ${repository}#${issue.number}`);
     }
@@ -329,7 +337,7 @@ export class GitHubScmAdapter implements ScmAdapter {
       `/repos/${repositoryPath(repositoryName)}`,
     );
     const fullName = response.full_name || repositoryName;
-    const repositoryId = createRepositoryId(fullName);
+    const repositoryId = githubRepositoryId(fullName);
     const remoteUrl =
       firstNonEmpty(response.clone_url, response.ssh_url) ?? `https://github.com/${fullName}.git`;
     const repositoryUrl = firstNonEmpty(response.html_url);
@@ -399,9 +407,7 @@ export class GitHubScmAdapter implements ScmAdapter {
     const response = await this.api.request<GitHubPullRequestResponse>(
       `/repos/${repositoryPath(repository.reference.id)}/pulls/${parsed.number}`,
     );
-    const previous = this.pullRequests.get(
-      String(createPullRequestId(`${repository.reference.id}#${parsed.number}`)),
-    );
+    const previous = this.pullRequests.get(String(githubPullRequestId(repository, parsed.number)));
     const pullRequest = this.rememberPullRequest(repository, response);
     if (previous !== undefined && previous.pullRequest.status !== pullRequest.status) {
       await this.publish({
@@ -421,7 +427,7 @@ export class GitHubScmAdapter implements ScmAdapter {
 
   public async createPullRequest(input: CreatePullRequestInput): Promise<PullRequest> {
     const repository = await this.getCachedRepository(input.repositoryId);
-    const content = buildGitHubPullRequestContent(input);
+    const content = buildGitHubPullRequestContent(input, repository.reference);
     const requestBody: Record<string, string> = {
       title: content.title,
       head: normalizeBranchName(input.sourceBranch),
@@ -497,25 +503,28 @@ export class GitHubScmAdapter implements ScmAdapter {
     const deadline = this.now() + timeoutMs;
     while (true) {
       const checks = await this.listChecks(input.pullRequestId);
-      const required = this.mergePolicy.requiredChecks.map((name) =>
-        checks.find((check) => check.name === name),
-      );
-      const failed = required.filter(
-        (check): check is Check =>
-          check !== undefined && (check.status === 'failed' || check.status === 'cancelled'),
-      );
+      const required = new Map(checks.map((check) => [check.name, check]));
+      const failed: Check[] = [];
+      const pending: Check[] = [];
+      const missingChecks: string[] = [];
+      for (const name of this.mergePolicy.requiredChecks) {
+        const check = required.get(name);
+        if (check === undefined) {
+          missingChecks.push(name);
+        } else if (check.status === 'failed' || check.status === 'cancelled') {
+          failed.push(check);
+        } else if (check.status === 'queued' || check.status === 'running') {
+          pending.push(check);
+        }
+      }
       if (failed.length > 0) {
         throw new RequiredChecksFailedError(failed);
       }
-      const pending = required.filter(
-        (check): check is Check =>
-          check === undefined || check.status === 'queued' || check.status === 'running',
-      );
-      if (pending.length === 0) {
+      if (pending.length === 0 && missingChecks.length === 0) {
         return checks;
       }
       if (this.now() >= deadline) {
-        throw new RequiredChecksTimeoutError(pending, timeoutMs);
+        throw new RequiredChecksTimeoutError(pending, timeoutMs, missingChecks);
       }
       await this.sleep(Math.min(pollIntervalMs, Math.max(0, deadline - this.now())));
     }
@@ -617,19 +626,24 @@ export class GitHubScmAdapter implements ScmAdapter {
     if (cached !== undefined) {
       return cached;
     }
-    return this.getRepository({ provider: this.provider, id: String(repositoryId) });
+    const referenceId = githubRepositoryReferenceFromId(repositoryId);
+    if (referenceId === undefined) {
+      throw new ScmMergeError(
+        `GitHub repository ${repositoryId} is not cached; discover it from a GitHub provider reference first.`,
+      );
+    }
+    return this.getRepository({ provider: this.provider, id: referenceId });
   }
 
   private rememberRepository(repository: Repository): void {
     this.repositories.set(String(repository.id), repository);
-    this.repositories.set(repository.reference.id, repository);
   }
 
   private rememberPullRequest(
     repository: Repository,
     response: GitHubPullRequestResponse,
   ): PullRequest {
-    const id = createPullRequestId(`${repository.reference.id}#${response.number}`);
+    const id = githubPullRequestId(repository, response.number);
     const pullRequestUrl = firstNonEmpty(response.html_url);
     const pullRequest: PullRequest = {
       id,
@@ -675,7 +689,7 @@ export class GitHubScmAdapter implements ScmAdapter {
         `Pull request ${pullRequestId} is not cached; use a GitHub pull request reference containing its repository.`,
       );
     }
-    const repository = await this.getCachedRepository(createRepositoryId(parsed.repository));
+    const repository = await this.getCachedRepository(githubRepositoryId(parsed.repository));
     const pullRequest = await this.getPullRequest(repository.id, pullRequestId);
     const result = this.pullRequests.get(String(pullRequest.id));
     if (result === undefined) {
@@ -720,23 +734,47 @@ function parseRepositoryReference(reference: ScmReference): string {
   return fullName.toLowerCase();
 }
 
+const GITHUB_REPOSITORY_ID_PREFIX = 'scm:github:repository:';
+const GITHUB_PULL_REQUEST_ID_PREFIX = 'scm:github:pull-request:';
+
+function githubRepositoryId(referenceId: string): RepositoryId {
+  return createRepositoryId(`${GITHUB_REPOSITORY_ID_PREFIX}${referenceId.toLowerCase()}`);
+}
+
+function githubRepositoryReferenceFromId(repositoryId: RepositoryId): string | undefined {
+  const value = String(repositoryId);
+  if (!value.startsWith(GITHUB_REPOSITORY_ID_PREFIX)) {
+    return undefined;
+  }
+  return githubRepositoryName(value.slice(GITHUB_REPOSITORY_ID_PREFIX.length))?.toLowerCase();
+}
+
+function githubPullRequestId(repository: Repository, number: number): PullRequestId {
+  return createPullRequestId(
+    `${GITHUB_PULL_REQUEST_ID_PREFIX}${repository.reference.id.toLowerCase()}#${number}`,
+  );
+}
+
 function parsePullRequestReference(value: string): {
   readonly repository?: string;
   readonly number: number;
 } {
-  const urlMatch = value.match(/github\.com\/([^/]+\/[^/#]+)\/pull\/(\d+)/i);
-  const repositoryMatch = value.match(/^([^#]+)#(\d+)$/);
-  const numberMatch = value.match(/^\d+$/);
-  const repository = urlMatch?.[1] ?? repositoryMatch?.[1];
-  const numberText = urlMatch?.[2] ?? repositoryMatch?.[2] ?? numberMatch?.[0];
+  const normalized = value.startsWith(GITHUB_PULL_REQUEST_ID_PREFIX)
+    ? value.slice(GITHUB_PULL_REQUEST_ID_PREFIX.length)
+    : undefined;
+  const match = normalized?.match(/^([^#]+)#(\d+)$/);
+  const repository = match?.[1];
+  const numberText = match?.[2];
   if (
+    repository === undefined ||
+    githubRepositoryName(repository) === undefined ||
     numberText === undefined ||
     !Number.isSafeInteger(Number(numberText)) ||
     Number(numberText) < 1
   ) {
-    throw new ScmMergeError(`Invalid GitHub pull request reference: ${value}.`);
+    throw new ScmMergeError(`Invalid GitHub pull request ID: ${value}.`);
   }
-  return { ...(repository === undefined ? {} : { repository }), number: Number(numberText) };
+  return { repository: repository.toLowerCase(), number: Number(numberText) };
 }
 
 function repositoryPath(fullName: string): string {
@@ -817,6 +855,8 @@ export async function pushGitBranch(
   runGit: GitHubGitExecutor = defaultGitExecutor,
 ): Promise<void> {
   const commitSha = requireText(input.commitSha, 'Git commit SHA').trim();
+  const branch = normalizeBranchName(input.branch);
+  const remoteUrl = requireText(input.remoteUrl, 'GitHub repository remote URL');
   const worktreePath = requireText(input.worktreePath, 'Git worktree path');
   const resolvedCommit = await runGit(
     'git',
@@ -824,7 +864,7 @@ export async function pushGitBranch(
     { cwd: worktreePath },
   );
   const verifiedCommitSha = requireVerifiedCommitSha(resolvedCommit.stdout);
-  const refspec = `${input.force ? '+' : ''}${verifiedCommitSha}:refs/heads/${input.branch}`;
+  const refspec = `${input.force ? '+' : ''}${verifiedCommitSha}:refs/heads/${branch}`;
   const env =
     options.token === undefined
       ? undefined
@@ -834,7 +874,7 @@ export async function pushGitBranch(
           GIT_CONFIG_KEY_0: 'http.extraheader',
           GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${options.token}`).toString('base64')}`,
         };
-  await runGit('git', ['push', input.remoteUrl, refspec], {
+  await runGit('git', ['push', remoteUrl, refspec], {
     cwd: worktreePath,
     ...(env === undefined ? {} : { env }),
   });
@@ -845,9 +885,14 @@ function mergeChecks(
   checkRuns: readonly GitHubCheckRunResponse[],
   statuses: readonly GitHubStatusContextResponse[],
 ): readonly Check[] {
-  const byName = new Map<string, Check>();
+  const byName = new Map<string, Check[]>();
+  const add = (check: Check): void => {
+    const sameName = byName.get(check.name) ?? [];
+    sameName.push(check);
+    byName.set(check.name, sameName);
+  };
   for (const checkRun of checkRuns) {
-    byName.set(checkRun.name, {
+    add({
       id: createCheckId(`github:run:${checkRun.id}`),
       pullRequestId,
       name: checkRun.name,
@@ -858,10 +903,7 @@ function mergeChecks(
     });
   }
   for (const status of statuses) {
-    if (byName.has(status.context)) {
-      continue;
-    }
-    byName.set(status.context, {
+    add({
       id: createCheckId(`github:status:${status.id}`),
       pullRequestId,
       name: status.context,
@@ -871,7 +913,36 @@ function mergeChecks(
         : { detailsUrl: status.target_url }),
     });
   }
-  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+  return [...byName.entries()]
+    .map(([name, checks]) => aggregateChecks(pullRequestId, name, checks))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+const CHECK_STATUS_PRIORITY: Readonly<Record<CheckStatus, number>> = {
+  passed: 0,
+  queued: 1,
+  running: 2,
+  cancelled: 3,
+  failed: 4,
+};
+
+function aggregateChecks(
+  pullRequestId: PullRequestId,
+  name: string,
+  checks: readonly Check[],
+): Check {
+  const mostPessimistic = checks.reduce((current, check) =>
+    CHECK_STATUS_PRIORITY[check.status] > CHECK_STATUS_PRIORITY[current.status] ? check : current,
+  );
+  return {
+    id: createCheckId(
+      `github:check:${encodeURIComponent(String(pullRequestId))}:${encodeURIComponent(name)}`,
+    ),
+    pullRequestId,
+    name,
+    status: mostPessimistic.status,
+    ...(mostPessimistic.detailsUrl === undefined ? {} : { detailsUrl: mostPessimistic.detailsUrl }),
+  };
 }
 
 function normalizeCheckRunStatus(
