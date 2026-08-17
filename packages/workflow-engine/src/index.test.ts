@@ -352,6 +352,33 @@ return agent(helper.prompt, { role: 'dynamic-imported-helper' })
     }
   });
 
+  it('resolves a nested workflow file and its imports relative to the workflow cwd', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'dark-kitchen-nested-workflow-import-'));
+    try {
+      await writeFile(
+        path.join(directory, 'helper.mjs'),
+        `export const prompt = 'nested helper';\n`,
+      );
+      await writeFile(
+        path.join(directory, 'child.ts'),
+        `${meta('file-child')}\nimport { prompt } from './helper.mjs'\nreturn agent(prompt, { role: 'nested-import' })\n`,
+      );
+      const registry = new WorkflowRegistry();
+      const result = await runWorkflow(
+        `${meta('file-parent')}\nreturn workflow({ scriptPath: './child.ts' })\n`,
+        {
+          cwd: directory,
+          runner: new ScriptedHarnessRunner((call) => call.prompt),
+          resolveWorkflow: registry.resolve.bind(registry),
+        },
+      );
+
+      expect(result.result).toBe('nested helper');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('normalizes optional null structured fields before validation', async () => {
     const result = await runWorkflow(
       `${meta('optional-null')}

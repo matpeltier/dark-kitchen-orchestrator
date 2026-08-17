@@ -68,6 +68,7 @@ interface RuntimeContext {
     parentPath: string,
     depth: number,
     invocation: number,
+    basePath: string,
   ): Promise<unknown>;
 }
 
@@ -327,7 +328,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     );
   };
 
-  context.runNested = (ref, args, parentPath, depth, invocation) => {
+  context.runNested = (ref, args, parentPath, depth, invocation, basePath) => {
     const promise = (async () => {
       throwIfAborted(options.signal, signal);
       const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
@@ -335,7 +336,9 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
         throw new WorkflowInputError(`workflow() nesting exceeds the maximum depth of ${maxDepth}`);
       if (!options.resolveWorkflow)
         throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
-      const resolved = await options.resolveWorkflow(toWorkflowRef(ref));
+      const resolved = await options.resolveWorkflow(
+        resolveWorkflowRef(toWorkflowRef(ref), basePath),
+      );
       const parsed = parseWorkflowScript(resolved.script);
       const childName = resolved.name ?? parsed.meta.name;
       return executeWorkflow(
@@ -444,7 +447,7 @@ async function executeWorkflow(
     const invocationKey = workflowRefKey(normalizedRef);
     const invocation = (nestedInvocations.get(invocationKey) ?? 0) + 1;
     nestedInvocations.set(invocationKey, invocation);
-    return context.runNested(normalizedRef, nestedArgs, workflowPath, depth, invocation);
+    return context.runNested(normalizedRef, nestedArgs, workflowPath, depth, invocation, basePath);
   };
   const budget: WorkflowBudget = Object.freeze({
     total: context.tokenBudget ?? null,
@@ -677,6 +680,13 @@ function toWorkflowRef(value: unknown): WorkflowRef {
     }
   }
   throw new WorkflowInputError('workflow() expects a workflow name or reference object');
+}
+
+function resolveWorkflowRef(ref: WorkflowRef, basePath: string): WorkflowRef {
+  if (typeof ref === 'string' || ref.scriptPath === undefined || path.isAbsolute(ref.scriptPath)) {
+    return ref;
+  }
+  return { ...ref, scriptPath: path.resolve(basePath, ref.scriptPath) };
 }
 
 function workflowRefKey(ref: WorkflowRef): string {
