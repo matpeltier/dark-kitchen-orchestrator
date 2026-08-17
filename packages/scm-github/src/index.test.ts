@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { createRepositoryId, createTaskId } from '@dark-kitchen/core';
+import { createPullRequestId, createRepositoryId, createTaskId } from '@dark-kitchen/core';
 
 import {
   GitHubApiError,
@@ -227,6 +227,40 @@ describe('GitHub SCM adapter', () => {
     } finally {
       rmSync(remotePath, { recursive: true, force: true });
     }
+  });
+
+  it('does not treat GitHub provider references as repository or pull request domain IDs', async () => {
+    const api = new GitHubApiFixture();
+    const adapter = new GitHubScmAdapter({ api });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+
+    await expect(adapter.getRemoteUrl(createRepositoryId('acme/kitchen'))).rejects.toThrow(
+      'is not cached',
+    );
+    await expect(
+      adapter.getPullRequest(repository.id, createPullRequestId('acme/kitchen#1')),
+    ).rejects.toThrow('Invalid GitHub pull request ID');
+  });
+
+  it('looks up repositories and pull requests from namespaced domain IDs after a restart', async () => {
+    const api = new GitHubApiFixture();
+    const firstAdapter = new GitHubScmAdapter({ api });
+    const repository = await firstAdapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await firstAdapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Stable lookup',
+    });
+
+    const restartedAdapter = new GitHubScmAdapter({ api });
+    await expect(
+      restartedAdapter.getPullRequest(repository.id, pullRequest.id),
+    ).resolves.toMatchObject({
+      id: pullRequest.id,
+      repositoryId: repository.id,
+      reference: { id: 'acme/kitchen#1' },
+    });
   });
 
   it('pushes a verified commit from the supplied worktree when the process cwd is unrelated', async () => {
@@ -533,13 +567,17 @@ describe('GitHub SCM adapter', () => {
 
     let timeoutError: unknown;
     try {
-      await adapter.waitForChecks({ pullRequestId: pullRequest.id });
+      await adapter.mergePullRequest({ pullRequestId: pullRequest.id });
     } catch (error) {
       timeoutError = error;
     }
 
     expect(timeoutError).toBeInstanceOf(RequiredChecksTimeoutError);
-    expect(timeoutError).toMatchObject({ checks: [], missingChecks: ['CI'] });
+    if (!(timeoutError instanceof RequiredChecksTimeoutError)) {
+      throw timeoutError;
+    }
+    expect(timeoutError.checks).toEqual([]);
+    expect(timeoutError.missingChecks).toEqual(['CI']);
     expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
   });
 

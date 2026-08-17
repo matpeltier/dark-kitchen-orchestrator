@@ -395,11 +395,8 @@ export class GitHubScmAdapter implements ScmAdapter {
     pullRequestId: PullRequestId,
   ): Promise<PullRequest> {
     const repository = await this.getCachedRepository(repositoryId);
-    const parsed = parsePullRequestReference(String(pullRequestId));
-    if (
-      parsed.repository !== undefined &&
-      parsed.repository.toLowerCase() !== repository.reference.id.toLowerCase()
-    ) {
+    const parsed = parseGitHubPullRequestId(pullRequestId);
+    if (parsed.repository.toLowerCase() !== repository.reference.id.toLowerCase()) {
       throw new ScmMergeError(
         `Pull request ${pullRequestId} does not belong to repository ${repositoryId}.`,
       );
@@ -683,12 +680,7 @@ export class GitHubScmAdapter implements ScmAdapter {
     if (cached !== undefined) {
       return cached;
     }
-    const parsed = parsePullRequestReference(String(pullRequestId));
-    if (parsed.repository === undefined) {
-      throw new ScmMergeError(
-        `Pull request ${pullRequestId} is not cached; use a GitHub pull request reference containing its repository.`,
-      );
-    }
+    const parsed = parseGitHubPullRequestId(pullRequestId);
     const repository = await this.getCachedRepository(githubRepositoryId(parsed.repository));
     const pullRequest = await this.getPullRequest(repository.id, pullRequestId);
     const result = this.pullRequests.get(String(pullRequest.id));
@@ -755,12 +747,13 @@ function githubPullRequestId(repository: Repository, number: number): PullReques
   );
 }
 
-function parsePullRequestReference(value: string): {
-  readonly repository?: string;
+function parseGitHubPullRequestId(value: PullRequestId): {
+  readonly repository: string;
   readonly number: number;
 } {
-  const normalized = value.startsWith(GITHUB_PULL_REQUEST_ID_PREFIX)
-    ? value.slice(GITHUB_PULL_REQUEST_ID_PREFIX.length)
+  const stringValue = String(value);
+  const normalized = stringValue.startsWith(GITHUB_PULL_REQUEST_ID_PREFIX)
+    ? stringValue.slice(GITHUB_PULL_REQUEST_ID_PREFIX.length)
     : undefined;
   const match = normalized?.match(/^([^#]+)#(\d+)$/);
   const repository = match?.[1];
@@ -772,7 +765,7 @@ function parsePullRequestReference(value: string): {
     !Number.isSafeInteger(Number(numberText)) ||
     Number(numberText) < 1
   ) {
-    throw new ScmMergeError(`Invalid GitHub pull request ID: ${value}.`);
+    throw new ScmMergeError(`Invalid GitHub pull request ID: ${stringValue}.`);
   }
   return { repository: repository.toLowerCase(), number: Number(numberText) };
 }
