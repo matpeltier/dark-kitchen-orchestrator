@@ -125,6 +125,18 @@ interface GitHubCommitChecks {
   readonly statuses: readonly GitHubStatusContextResponse[];
 }
 
+interface CheckedPullRequestSnapshot {
+  readonly headSha: string;
+  readonly baseSha: string | undefined;
+  readonly testMergeSha: string | undefined;
+  readonly checkedCommitSha: string;
+}
+
+interface CheckedPullRequest {
+  readonly checks: readonly Check[];
+  readonly snapshot: CheckedPullRequestSnapshot;
+}
+
 interface CachedPullRequest {
   readonly repositoryId: RepositoryId;
   readonly number: number;
@@ -178,6 +190,21 @@ export class PullRequestHeadChangedError extends ScmMergeError {
   public constructor(expectedHeadSha: string, actualHeadSha: string) {
     super(`Pull request head changed unexpectedly from ${expectedHeadSha} to ${actualHeadSha}.`);
     this.name = 'PullRequestHeadChangedError';
+  }
+}
+
+export class PullRequestSnapshotChangedError extends ScmMergeError {
+  public constructor(
+    public readonly checkedCommitSha: string,
+    public readonly expectedBaseSha: string | undefined,
+    public readonly actualBaseSha: string | undefined,
+    public readonly expectedTestMergeSha: string | undefined,
+    public readonly actualTestMergeSha: string | undefined,
+  ) {
+    super(
+      `Pull request merge snapshot changed unexpectedly after checks were evaluated for ${checkedCommitSha}.`,
+    );
+    this.name = 'PullRequestSnapshotChangedError';
   }
 }
 
@@ -455,6 +482,10 @@ export class GitHubScmAdapter implements ScmAdapter {
   }
 
   public async listChecks(pullRequestId: PullRequestId): Promise<readonly Check[]> {
+    return (await this.listChecksForSnapshot(pullRequestId)).checks;
+  }
+
+  private async listChecksForSnapshot(pullRequestId: PullRequestId): Promise<CheckedPullRequest> {
     const cached = await this.getCachedPullRequest(pullRequestId);
     const pullRequest = await this.getPullRequest(cached.repositoryId, pullRequestId);
     if (pullRequest.headSha === undefined) {
@@ -462,16 +493,15 @@ export class GitHubScmAdapter implements ScmAdapter {
     }
     const repository = await this.getCachedRepository(cached.repositoryId);
     let commitChecks: GitHubCommitChecks | undefined;
+    let checkedCommitSha = pullRequest.headSha;
+    const testMergeSha = openTestMergeSha(pullRequest);
     // Before a PR is merged GitHub exposes mergeCommitSha as its test-merge commit.
     // That commit is authoritative only when at least one status check exists on it.
-    if (
-      pullRequest.status === 'open' &&
-      pullRequest.mergeCommitSha !== undefined &&
-      pullRequest.mergeCommitSha !== pullRequest.headSha
-    ) {
-      const mergeCommitChecks = await this.listCommitChecks(repository, pullRequest.mergeCommitSha);
+    if (testMergeSha !== undefined) {
+      const mergeCommitChecks = await this.listCommitChecks(repository, testMergeSha);
       if (mergeCommitChecks.checkRuns.length > 0 || mergeCommitChecks.statuses.length > 0) {
         commitChecks = mergeCommitChecks;
+        checkedCommitSha = testMergeSha;
       }
     }
     commitChecks ??= await this.listCommitChecks(repository, pullRequest.headSha);
@@ -496,7 +526,15 @@ export class GitHubScmAdapter implements ScmAdapter {
         }
       }
     }
-    return checks;
+    return {
+      checks,
+      snapshot: {
+        headSha: pullRequest.headSha,
+        baseSha: pullRequest.baseSha,
+        testMergeSha,
+        checkedCommitSha,
+      },
+    };
   }
 
   private async listCommitChecks(
@@ -520,6 +558,10 @@ export class GitHubScmAdapter implements ScmAdapter {
   }
 
   public async waitForChecks(input: WaitForChecksInput): Promise<readonly Check[]> {
+    return (await this.waitForCheckedSnapshot(input)).checks;
+  }
+
+  private async waitForCheckedSnapshot(input: WaitForChecksInput): Promise<CheckedPullRequest> {
     const timeoutMs = nonNegativeFinite(
       input.timeoutMs ?? this.mergePolicy.checkTimeoutMs,
       'Check timeout',
@@ -530,7 +572,8 @@ export class GitHubScmAdapter implements ScmAdapter {
     );
     const deadline = this.now() + timeoutMs;
     while (true) {
-      const checks = await this.listChecks(input.pullRequestId);
+      const checked = await this.listChecksForSnapshot(input.pullRequestId);
+      const checks = checked.checks;
       const required = new Map(checks.map((check) => [check.name, check]));
       const failed: Check[] = [];
       const pending: Check[] = [];
@@ -549,7 +592,7 @@ export class GitHubScmAdapter implements ScmAdapter {
         throw new RequiredChecksFailedError(failed);
       }
       if (pending.length === 0 && missingChecks.length === 0) {
-        return checks;
+        return checked;
       }
       if (this.now() >= deadline) {
         throw new RequiredChecksTimeoutError(pending, timeoutMs, missingChecks);
@@ -566,32 +609,28 @@ export class GitHubScmAdapter implements ScmAdapter {
         `Merge strategy ${requestedStrategy} is not permitted; configured strategy is ${this.mergePolicy.strategy}.`,
       );
     }
-    const initial = await this.getCachedPullRequest(input.pullRequestId);
-    const expectedHeadSha = input.expectedHeadSha ?? initial.pullRequest.headSha;
+    const cached = await this.getCachedPullRequest(input.pullRequestId);
+    const initial = await this.getPullRequest(cached.repositoryId, input.pullRequestId);
+    const expectedHeadSha = input.expectedHeadSha ?? initial.headSha;
     if (expectedHeadSha === undefined) {
       throw new ScmMergeError(
         `Pull request ${input.pullRequestId} has no head SHA for safe merging.`,
       );
     }
-    if (
-      input.expectedHeadSha !== undefined &&
-      input.expectedHeadSha !== initial.pullRequest.headSha
-    ) {
-      throw new PullRequestHeadChangedError(
-        input.expectedHeadSha,
-        initial.pullRequest.headSha ?? 'missing',
-      );
+    if (input.expectedHeadSha !== undefined && input.expectedHeadSha !== initial.headSha) {
+      throw new PullRequestHeadChangedError(input.expectedHeadSha, initial.headSha ?? 'missing');
     }
 
-    await this.waitForChecks({ pullRequestId: input.pullRequestId });
-    const current = await this.getPullRequest(initial.repositoryId, input.pullRequestId);
-    const repository = await this.getCachedRepository(initial.repositoryId);
+    const checked = await this.waitForCheckedSnapshot({ pullRequestId: input.pullRequestId });
+    const current = await this.getPullRequest(cached.repositoryId, input.pullRequestId);
+    const repository = await this.getCachedRepository(cached.repositoryId);
     if (current.headSha !== expectedHeadSha) {
       throw new PullRequestHeadChangedError(expectedHeadSha, current.headSha ?? 'missing');
     }
     if (current.status !== 'open') {
       throw new ScmMergeError(`Pull request ${input.pullRequestId} is not open.`);
     }
+    this.assertCheckedSnapshotUnchanged(checked.snapshot, current);
 
     let mergeResponse: GitHubMergeResponse;
     try {
@@ -620,7 +659,7 @@ export class GitHubScmAdapter implements ScmAdapter {
       );
     }
 
-    const merged = await this.getPullRequest(initial.repositoryId, input.pullRequestId);
+    const merged = await this.getPullRequest(cached.repositoryId, input.pullRequestId);
     if (!(await this.verifyPullRequestMerged(input.pullRequestId))) {
       throw new ScmMergeError(
         `GitHub did not report pull request ${input.pullRequestId} as merged.`,
@@ -721,6 +760,25 @@ export class GitHubScmAdapter implements ScmAdapter {
       throw new ScmMergeError(`Could not cache pull request ${pullRequestId}.`);
     }
     return result;
+  }
+
+  private assertCheckedSnapshotUnchanged(
+    checked: CheckedPullRequestSnapshot,
+    current: PullRequest,
+  ): void {
+    if (current.headSha !== checked.headSha) {
+      throw new PullRequestHeadChangedError(checked.headSha, current.headSha ?? 'missing');
+    }
+    const currentTestMergeSha = openTestMergeSha(current);
+    if (current.baseSha !== checked.baseSha || currentTestMergeSha !== checked.testMergeSha) {
+      throw new PullRequestSnapshotChangedError(
+        checked.checkedCommitSha,
+        checked.baseSha,
+        current.baseSha,
+        checked.testMergeSha,
+        currentTestMergeSha,
+      );
+    }
   }
 
   private async publish(event: DomainEvent): Promise<void> {
@@ -851,6 +909,14 @@ function normalizeMergeStrategy(value: MergeStrategy): MergeStrategy {
     default:
       throw new MergePolicyError(`Unsupported GitHub merge strategy: ${String(value)}.`);
   }
+}
+
+function openTestMergeSha(pullRequest: PullRequest): string | undefined {
+  return pullRequest.status === 'open' &&
+    pullRequest.mergeCommitSha !== undefined &&
+    pullRequest.mergeCommitSha !== pullRequest.headSha
+    ? pullRequest.mergeCommitSha
+    : undefined;
 }
 
 function githubIssueReference(reference: {

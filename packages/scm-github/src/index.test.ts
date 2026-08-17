@@ -58,8 +58,11 @@ class GitHubApiFixture implements GitHubApiClient {
   public readonly checkRunsByCommit = new Map<string, readonly FakeCheckRun[]>();
   public readonly statusesByCommit = new Map<string, readonly FakeCommitStatus[]>();
   public headSha = 'head-sha';
+  public baseSha = 'base-sha';
   public mergeCommitSha: string | null = null;
   public changeHeadWhenChecksAreRead = false;
+  public changeBaseWhenChecksAreRead = false;
+  public changeTestMergeWhenChecksAreRead = false;
   public remoteUrl = 'https://github.com/acme/kitchen.git';
 
   public async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -103,6 +106,12 @@ class GitHubApiFixture implements GitHubApiClient {
       if (this.changeHeadWhenChecksAreRead) {
         this.headSha = 'changed-sha';
       }
+      if (this.changeBaseWhenChecksAreRead) {
+        this.baseSha = 'changed-base-sha';
+      }
+      if (this.changeTestMergeWhenChecksAreRead) {
+        this.mergeCommitSha = 'changed-test-merge-sha';
+      }
       const configuredCheckRuns = this.checkRunsByCommit.get(commitSha);
       const checkRuns =
         configuredCheckRuns ??
@@ -137,7 +146,7 @@ class GitHubApiFixture implements GitHubApiClient {
       html_url: 'https://github.com/acme/kitchen/pull/1',
       merge_commit_sha: this.merged ? 'merge-sha' : this.mergeCommitSha,
       head: { ref: 'feature/task-1', sha: this.headSha },
-      base: { ref: 'main', sha: 'base-sha' },
+      base: { ref: 'main', sha: this.baseSha },
     };
   }
 }
@@ -797,6 +806,61 @@ describe('GitHub SCM adapter', () => {
       'head changed unexpectedly',
     );
     expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
+  it.each([
+    ['base SHA', true, false],
+    ['test-merge SHA', false, true],
+  ])(
+    'refuses a merge if the checked PR %s changes after checks are read',
+    async (_snapshotPart, changeBaseWhenChecksAreRead, changeTestMergeWhenChecksAreRead) => {
+      const api = new GitHubApiFixture();
+      api.mergeCommitSha = 'test-merge-sha';
+      api.checkRunsByCommit.set('test-merge-sha', [fakeCheckRun(8, 'CI', 'success')]);
+      api.changeBaseWhenChecksAreRead = changeBaseWhenChecksAreRead;
+      api.changeTestMergeWhenChecksAreRead = changeTestMergeWhenChecksAreRead;
+      const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'] });
+      const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+      const pullRequest = await adapter.createPullRequest({
+        repositoryId: repository.id,
+        sourceBranch: 'feature/task-1',
+        targetBranch: 'main',
+        title: 'Changed merge snapshot',
+      });
+
+      await expect(adapter.mergePullRequest({ pullRequestId: pullRequest.id })).rejects.toThrow(
+        'merge snapshot changed unexpectedly',
+      );
+      expect(
+        api.requests.some((request) => request.path.includes('/commits/test-merge-sha/check-runs')),
+      ).toBe(true);
+      expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+    },
+  );
+
+  it('refreshes an updated PR head before evaluating a matching expected head SHA', async () => {
+    const api = new GitHubApiFixture();
+    const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'] });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Updated head',
+    });
+    api.headSha = 'updated-head-sha';
+
+    await expect(
+      adapter.mergePullRequest({
+        pullRequestId: pullRequest.id,
+        expectedHeadSha: 'updated-head-sha',
+      }),
+    ).resolves.toMatchObject({ status: 'merged', headSha: 'updated-head-sha' });
+    expect(
+      api.requests.some((request) => request.path.includes('/commits/updated-head-sha/check-runs')),
+    ).toBe(true);
+    const mergeRequest = api.requests.find((request) => request.path.endsWith('/pulls/1/merge'));
+    expect(mergeRequest?.body).toContain('"sha":"updated-head-sha"');
   });
 
   it('refuses a merge strategy that differs from the configured policy', async () => {
