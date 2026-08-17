@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { createPullRequestId, createRepositoryId, createTaskId } from '@dark-kitchen/core';
+import type { MergeStrategy } from '@dark-kitchen/core';
 
 import {
   GitHubApiError,
@@ -487,6 +488,32 @@ describe('GitHub SCM adapter', () => {
     ).rejects.toThrow('Invalid GitHub branch name');
   });
 
+  it.each(['feature/.hidden', 'feature/ends.', 'feature/has space', '@'])(
+    'rejects Git-invalid branch name %s before invoking Git',
+    async (branch) => {
+      let gitInvocations = 0;
+      const runGit: GitHubGitExecutor = async () => {
+        gitInvocations += 1;
+        return { stdout: `${'a'.repeat(40)}\n`, stderr: '' };
+      };
+
+      await expect(
+        pushGitBranch(
+          {
+            remoteUrl: 'https://github.com/acme/kitchen.git',
+            branch,
+            commitSha: 'a'.repeat(40),
+            worktreePath: '/tmp/task-worktree',
+            force: false,
+          },
+          { token: undefined },
+          runGit,
+        ),
+      ).rejects.toThrow('Invalid GitHub branch name');
+      expect(gitInvocations).toBe(0);
+    },
+  );
+
   it('does not reuse branch-pushed event IDs across adapter instances', async () => {
     const api = new GitHubApiFixture();
     const eventIds: string[] = [];
@@ -786,6 +813,30 @@ describe('GitHub SCM adapter', () => {
     await expect(
       adapter.mergePullRequest({ pullRequestId: pullRequest.id, mergeStrategy: 'rebase' }),
     ).rejects.toThrow('configured strategy is squash');
+    expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
+  it('rejects merge strategies that are invalid at the runtime boundary', async () => {
+    expect(() => new GitHubScmAdapter({ mergeStrategy: 'octopus' as MergeStrategy })).toThrow(
+      'Unsupported GitHub merge strategy: octopus.',
+    );
+
+    const api = new GitHubApiFixture();
+    const adapter = new GitHubScmAdapter({ api });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Runtime policy check',
+    });
+
+    await expect(
+      adapter.mergePullRequest({
+        pullRequestId: pullRequest.id,
+        mergeStrategy: 'octopus' as MergeStrategy,
+      }),
+    ).rejects.toThrow('Unsupported GitHub merge strategy: octopus.');
     expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
   });
 

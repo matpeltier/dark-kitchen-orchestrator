@@ -316,7 +316,9 @@ export class GitHubScmAdapter implements ScmAdapter {
 
     const configuredPolicy = options.mergePolicy ?? {};
     this.mergePolicy = {
-      strategy: options.mergeStrategy ?? configuredPolicy.strategy ?? 'squash',
+      strategy: normalizeMergeStrategy(
+        options.mergeStrategy ?? configuredPolicy.strategy ?? 'squash',
+      ),
       requiredChecks: normalizeRequiredChecks(
         options.requiredChecks ?? configuredPolicy.requiredChecks ?? [],
       ),
@@ -557,9 +559,11 @@ export class GitHubScmAdapter implements ScmAdapter {
   }
 
   public async mergePullRequest(input: MergePullRequestInput): Promise<PullRequest> {
-    if (input.mergeStrategy !== undefined && input.mergeStrategy !== this.mergePolicy.strategy) {
+    const requestedStrategy =
+      input.mergeStrategy === undefined ? undefined : normalizeMergeStrategy(input.mergeStrategy);
+    if (requestedStrategy !== undefined && requestedStrategy !== this.mergePolicy.strategy) {
       throw new MergePolicyError(
-        `Merge strategy ${input.mergeStrategy} is not permitted; configured strategy is ${this.mergePolicy.strategy}.`,
+        `Merge strategy ${requestedStrategy} is not permitted; configured strategy is ${this.mergePolicy.strategy}.`,
       );
     }
     const initial = await this.getCachedPullRequest(input.pullRequestId);
@@ -808,22 +812,45 @@ function repositoryPath(fullName: string): string {
 
 function normalizeBranchName(value: string): string {
   const branch = value.trim().replace(/^refs\/heads\//, '');
+  const parts = branch.split('/');
   if (
     branch.length === 0 ||
     branch === '.' ||
     branch === '..' ||
+    branch === '@' ||
     branch.includes('..') ||
     branch.startsWith('/') ||
     branch.endsWith('/') ||
     branch.includes('//') ||
     branch.includes('@{') ||
     /[~^:?*[\\]/.test(branch) ||
-    [...branch].some((character) => character.charCodeAt(0) < 0x20) ||
-    branch.split('/').some((part) => part === '.' || part === '..' || part.endsWith('.lock'))
+    [...branch].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x20 || code === 0x7f;
+    }) ||
+    parts.some(
+      (part) =>
+        part === '.' ||
+        part === '..' ||
+        part.startsWith('.') ||
+        part.endsWith('.') ||
+        part.endsWith('.lock'),
+    )
   ) {
     throw new ScmMergeError(`Invalid GitHub branch name: ${value}.`);
   }
   return branch;
+}
+
+function normalizeMergeStrategy(value: MergeStrategy): MergeStrategy {
+  switch (value) {
+    case 'merge':
+    case 'squash':
+    case 'rebase':
+      return value;
+    default:
+      throw new MergePolicyError(`Unsupported GitHub merge strategy: ${String(value)}.`);
+  }
 }
 
 function githubIssueReference(reference: {
