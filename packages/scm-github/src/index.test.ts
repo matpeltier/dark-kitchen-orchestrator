@@ -27,6 +27,21 @@ interface FakePullRequest {
   readonly base: { readonly ref: string; readonly sha: string };
 }
 
+interface FakeCheckRun {
+  readonly id: number;
+  readonly name: string;
+  readonly status: string;
+  readonly conclusion: string | null;
+  readonly details_url?: string;
+}
+
+interface FakeCommitStatus {
+  readonly id: number;
+  readonly context: string;
+  readonly state: string;
+  readonly target_url?: string;
+}
+
 class GitHubApiFixture implements GitHubApiClient {
   public readonly requests: {
     readonly path: string;
@@ -38,13 +53,11 @@ class GitHubApiFixture implements GitHubApiClient {
   public checkConclusion = 'success';
   public checkStatus = 'completed';
   public includeCheckRun = true;
-  public statuses: readonly {
-    readonly id: number;
-    readonly context: string;
-    readonly state: string;
-    readonly target_url?: string;
-  }[] = [];
+  public statuses: readonly FakeCommitStatus[] = [];
+  public readonly checkRunsByCommit = new Map<string, readonly FakeCheckRun[]>();
+  public readonly statusesByCommit = new Map<string, readonly FakeCommitStatus[]>();
   public headSha = 'head-sha';
+  public mergeCommitSha: string | null = null;
   public changeHeadWhenChecksAreRead = false;
   public remoteUrl = 'https://github.com/acme/kitchen.git';
 
@@ -85,11 +98,14 @@ class GitHubApiFixture implements GitHubApiClient {
       return this.pullRequest() as T;
     }
     if (path.includes('/check-runs')) {
+      const commitSha = fixtureCommitSha(path);
       if (this.changeHeadWhenChecksAreRead) {
         this.headSha = 'changed-sha';
       }
-      return {
-        check_runs: this.includeCheckRun
+      const configuredCheckRuns = this.checkRunsByCommit.get(commitSha);
+      const checkRuns =
+        configuredCheckRuns ??
+        (this.includeCheckRun
           ? [
               {
                 id: 7,
@@ -99,11 +115,14 @@ class GitHubApiFixture implements GitHubApiClient {
                 details_url: 'https://github.com/acme/kitchen/actions/runs/7',
               },
             ]
-          : [],
+          : []);
+      return {
+        check_runs: fixturePage(path, checkRuns),
       } as T;
     }
     if (path.includes('/status')) {
-      return { statuses: this.statuses } as T;
+      const statuses = this.statusesByCommit.get(fixtureCommitSha(path)) ?? this.statuses;
+      return { statuses: fixturePage(path, statuses) } as T;
     }
     throw new Error(`Unhandled fixture request: ${init.method ?? 'GET'} ${path}`);
   }
@@ -115,11 +134,34 @@ class GitHubApiFixture implements GitHubApiClient {
       state: this.merged ? 'closed' : 'open',
       merged_at: this.merged ? '2026-08-17T00:00:01.000Z' : null,
       html_url: 'https://github.com/acme/kitchen/pull/1',
-      merge_commit_sha: this.merged ? 'merge-sha' : null,
+      merge_commit_sha: this.merged ? 'merge-sha' : this.mergeCommitSha,
       head: { ref: 'feature/task-1', sha: this.headSha },
       base: { ref: 'main', sha: 'base-sha' },
     };
   }
+}
+
+function fixtureCommitSha(path: string): string {
+  const commitSha = path.match(/\/commits\/([^/]+)\//)?.[1];
+  if (commitSha === undefined) {
+    throw new Error(`Fixture request has no commit SHA: ${path}`);
+  }
+  return decodeURIComponent(commitSha);
+}
+
+function fixturePage<T>(path: string, items: readonly T[]): readonly T[] {
+  const searchParams = new URL(path, 'https://api.github.test').searchParams;
+  const page = Number(searchParams.get('page') ?? '1');
+  const perPage = Number(searchParams.get('per_page') ?? '30');
+  return items.slice((page - 1) * perPage, page * perPage);
+}
+
+function fakeCheckRun(id: number, name: string, conclusion: string): FakeCheckRun {
+  return { id, name, status: 'completed', conclusion };
+}
+
+function fakeCommitStatus(id: number, context: string, state: string): FakeCommitStatus {
+  return { id, context, state };
 }
 
 const opaqueRepositoryId = createRepositoryId('repository-01HRQX7E8W9KFAKEOPAQUE');
@@ -500,6 +542,137 @@ describe('GitHub SCM adapter', () => {
     await expect(adapter.mergePullRequest({ pullRequestId: pullRequest.id })).rejects.toThrow(
       'Required checks failed: CI.',
     );
+    expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
+  it('uses test-merge checks when they differ from passing head checks', async () => {
+    const api = new GitHubApiFixture();
+    api.mergeCommitSha = 'test-merge-sha';
+    api.checkRunsByCommit.set('head-sha', [fakeCheckRun(7, 'CI', 'success')]);
+    api.checkRunsByCommit.set('test-merge-sha', [fakeCheckRun(8, 'CI', 'failure')]);
+    const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Test merge checks',
+    });
+
+    await expect(adapter.mergePullRequest({ pullRequestId: pullRequest.id })).rejects.toThrow(
+      'Required checks failed: CI.',
+    );
+    expect(
+      api.requests.some((request) => request.path.includes('/commits/test-merge-sha/check-runs')),
+    ).toBe(true);
+    expect(
+      api.requests.some((request) => request.path.includes('/commits/head-sha/check-runs')),
+    ).toBe(false);
+    expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
+  it('accepts passing test-merge checks when the required head check is absent', async () => {
+    const api = new GitHubApiFixture();
+    api.mergeCommitSha = 'test-merge-sha';
+    api.checkRunsByCommit.set('head-sha', []);
+    api.checkRunsByCommit.set('test-merge-sha', [fakeCheckRun(8, 'CI', 'success')]);
+    const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Passing test merge checks',
+    });
+
+    await expect(
+      adapter.mergePullRequest({ pullRequestId: pullRequest.id }),
+    ).resolves.toMatchObject({ status: 'merged' });
+    expect(
+      api.requests.some((request) => request.path.includes('/commits/test-merge-sha/check-runs')),
+    ).toBe(true);
+    expect(
+      api.requests.some((request) => request.path.includes('/commits/head-sha/check-runs')),
+    ).toBe(false);
+  });
+
+  it('falls back to head checks when the test-merge commit has no statuses', async () => {
+    const api = new GitHubApiFixture();
+    api.mergeCommitSha = 'test-merge-sha';
+    api.checkRunsByCommit.set('test-merge-sha', []);
+    api.statusesByCommit.set('test-merge-sha', []);
+    api.checkRunsByCommit.set('head-sha', [fakeCheckRun(7, 'CI', 'success')]);
+    const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Head fallback checks',
+    });
+
+    await expect(
+      adapter.mergePullRequest({ pullRequestId: pullRequest.id }),
+    ).resolves.toMatchObject({ status: 'merged' });
+    expect(
+      api.requests.some((request) => request.path.includes('/commits/test-merge-sha/check-runs')),
+    ).toBe(true);
+    expect(
+      api.requests.some((request) => request.path.includes('/commits/head-sha/check-runs')),
+    ).toBe(true);
+  });
+
+  it('refuses a same-named failing required check run beyond page 1', async () => {
+    const api = new GitHubApiFixture();
+    api.checkRunsByCommit.set('head-sha', [
+      fakeCheckRun(1, 'CI', 'success'),
+      ...Array.from({ length: 99 }, (_, index) =>
+        fakeCheckRun(index + 2, `Optional check ${index + 1}`, 'success'),
+      ),
+      fakeCheckRun(101, 'CI', 'failure'),
+    ]);
+    const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Paginated check runs',
+    });
+
+    await expect(adapter.mergePullRequest({ pullRequestId: pullRequest.id })).rejects.toThrow(
+      'Required checks failed: CI.',
+    );
+    expect(
+      api.requests.some((request) => request.path.endsWith('/check-runs?per_page=100&page=2')),
+    ).toBe(true);
+    expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
+  it('refuses a failing required commit status beyond page 1', async () => {
+    const api = new GitHubApiFixture();
+    api.includeCheckRun = false;
+    api.statuses = [
+      ...Array.from({ length: 100 }, (_, index) =>
+        fakeCommitStatus(index + 1, `Optional status ${index + 1}`, 'success'),
+      ),
+      fakeCommitStatus(101, 'CI', 'failure'),
+    ];
+    const adapter = new GitHubScmAdapter({ api, requiredChecks: ['CI'], checkTimeoutMs: 0 });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId: repository.id,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Paginated commit statuses',
+    });
+
+    await expect(adapter.mergePullRequest({ pullRequestId: pullRequest.id })).rejects.toThrow(
+      'Required checks failed: CI.',
+    );
+    expect(
+      api.requests.some((request) => request.path.endsWith('/status?per_page=100&page=2')),
+    ).toBe(true);
     expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
   });
 

@@ -120,6 +120,11 @@ interface GitHubMergeResponse {
   readonly message?: string;
 }
 
+interface GitHubCommitChecks {
+  readonly checkRuns: readonly GitHubCheckRunResponse[];
+  readonly statuses: readonly GitHubStatusContextResponse[];
+}
+
 interface CachedPullRequest {
   readonly repositoryId: RepositoryId;
   readonly number: number;
@@ -449,25 +454,29 @@ export class GitHubScmAdapter implements ScmAdapter {
 
   public async listChecks(pullRequestId: PullRequestId): Promise<readonly Check[]> {
     const cached = await this.getCachedPullRequest(pullRequestId);
-    if (cached.pullRequest.headSha === undefined) {
+    const pullRequest = await this.getPullRequest(cached.repositoryId, pullRequestId);
+    if (pullRequest.headSha === undefined) {
       throw new ScmMergeError(`Pull request ${pullRequestId} has no head commit SHA.`);
     }
     const repository = await this.getCachedRepository(cached.repositoryId);
-    const pathPrefix = `/repos/${repositoryPath(repository.reference.id)}/commits/${encodeURIComponent(cached.pullRequest.headSha)}`;
-    const checkRuns = await this.api.request<GitHubCheckRunsResponse>(
-      `${pathPrefix}/check-runs?per_page=100`,
-    );
-    const statuses = await this.api.request<GitHubStatusResponse>(
-      `${pathPrefix}/status?per_page=100`,
-    );
-    const checks = mergeChecks(
-      cached.pullRequest.id,
-      checkRuns.check_runs ?? [],
-      statuses.statuses ?? [],
-    );
-    const previous = this.previousChecks.get(String(cached.pullRequest.id));
+    let commitChecks: GitHubCommitChecks | undefined;
+    // Before a PR is merged GitHub exposes mergeCommitSha as its test-merge commit.
+    // That commit is authoritative only when at least one status check exists on it.
+    if (
+      pullRequest.status === 'open' &&
+      pullRequest.mergeCommitSha !== undefined &&
+      pullRequest.mergeCommitSha !== pullRequest.headSha
+    ) {
+      const mergeCommitChecks = await this.listCommitChecks(repository, pullRequest.mergeCommitSha);
+      if (mergeCommitChecks.checkRuns.length > 0 || mergeCommitChecks.statuses.length > 0) {
+        commitChecks = mergeCommitChecks;
+      }
+    }
+    commitChecks ??= await this.listCommitChecks(repository, pullRequest.headSha);
+    const checks = mergeChecks(pullRequest.id, commitChecks.checkRuns, commitChecks.statuses);
+    const previous = this.previousChecks.get(String(pullRequest.id));
     const next = new Map(checks.map((check) => [check.name, check]));
-    this.previousChecks.set(String(cached.pullRequest.id), next);
+    this.previousChecks.set(String(pullRequest.id), next);
     if (previous !== undefined) {
       for (const check of checks) {
         const previousCheck = previous.get(check.name);
@@ -486,6 +495,26 @@ export class GitHubScmAdapter implements ScmAdapter {
       }
     }
     return checks;
+  }
+
+  private async listCommitChecks(
+    repository: Repository,
+    commitSha: string,
+  ): Promise<GitHubCommitChecks> {
+    const pathPrefix = `/repos/${repositoryPath(repository.reference.id)}/commits/${encodeURIComponent(commitSha)}`;
+    const [checkRuns, statuses] = await Promise.all([
+      collectGitHubPages(
+        this.api,
+        `${pathPrefix}/check-runs`,
+        (response: GitHubCheckRunsResponse) => response.check_runs ?? [],
+      ),
+      collectGitHubPages(
+        this.api,
+        `${pathPrefix}/status`,
+        (response: GitHubStatusResponse) => response.statuses ?? [],
+      ),
+    ]);
+    return { checkRuns, statuses };
   }
 
   public async waitForChecks(input: WaitForChecksInput): Promise<readonly Check[]> {
@@ -871,6 +900,26 @@ export async function pushGitBranch(
     cwd: worktreePath,
     ...(env === undefined ? {} : { env }),
   });
+}
+
+const GITHUB_API_PAGE_SIZE = 100;
+
+async function collectGitHubPages<TResponse, TItem>(
+  api: GitHubApiClient,
+  path: string,
+  selectItems: (response: TResponse) => readonly TItem[],
+): Promise<readonly TItem[]> {
+  const items: TItem[] = [];
+  for (let page = 1; ; page += 1) {
+    const response = await api.request<TResponse>(
+      `${path}?per_page=${GITHUB_API_PAGE_SIZE}&page=${page}`,
+    );
+    const pageItems = selectItems(response);
+    items.push(...pageItems);
+    if (pageItems.length < GITHUB_API_PAGE_SIZE) {
+      return items;
+    }
+  }
 }
 
 function mergeChecks(
