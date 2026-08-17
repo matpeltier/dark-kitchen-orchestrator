@@ -86,6 +86,17 @@ describe('safe process execution', () => {
     ).rejects.toBeInstanceOf(ProcessExecutionError);
   });
 
+  it('returns a rejected promise when spawning fails synchronously', async () => {
+    const definition = defineProcess({
+      executable:
+        process.platform === 'win32' ? 'Z:\\missing\\dark-kitchen' : '/missing/dark-kitchen',
+    });
+
+    await expect(executeProcess({ definition })).rejects.toMatchObject({
+      name: 'ProcessExecutionError',
+    });
+  });
+
   it('rejects and cleans up when a stream payload fails', async () => {
     const sourceError = new Error('payload source failed');
     const source = new Readable({
@@ -151,6 +162,23 @@ describe('safe process execution', () => {
     } finally {
       await rm(marker, { force: true });
     }
+  });
+
+  it('destroys a stream payload when the started diagnostic fails', async () => {
+    const source = Readable.from(['payload']);
+    const callbackError = new Error('started diagnostic failed');
+    const definition = defineProcess({ executable: process.execPath });
+
+    await expect(
+      executeProcess({
+        definition,
+        payload: streamPayload(source),
+        onDiagnostic: () => {
+          throw callbackError;
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'ProcessExecutionError', cause: callbackError });
+    expect(source.destroyed).toBe(true);
   });
 
   it('rejects when the finished diagnostic fails', async () => {

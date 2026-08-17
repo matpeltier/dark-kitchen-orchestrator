@@ -342,7 +342,17 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
   };
 
   const args = invocation.definition.args.map((arg) => String(arg));
-  const child = spawn(invocation.definition.executable, args, spawnOptions);
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(invocation.definition.executable, args, spawnOptions);
+  } catch (error) {
+    return Promise.reject(
+      new ProcessExecutionError(
+        `Unable to launch process ${invocation.definition.executable}`,
+        error,
+      ),
+    );
+  }
   const childStdin = child.stdin;
   const childStdout = child.stdout;
   const childStderr = child.stderr;
@@ -374,7 +384,8 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
   return new Promise<ProcessResult>((resolve, reject) => {
     let settled = false;
     let stdinCompleted = false;
-    let sourceStream: Readable | undefined;
+    const sourceStream: Readable | undefined =
+      payload?.kind === 'stream' ? payload.stream : undefined;
 
     const cleanup = (): void => {
       if (sourceStream !== undefined) {
@@ -469,9 +480,6 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
     }
 
     try {
-      if (payload?.kind === 'stream') {
-        sourceStream = payload.stream;
-      }
       const transfer = finishStdin(payload, childStdin);
       transfer?.then(
         () => {
@@ -564,14 +572,21 @@ export function executeExceptionalShell(
     assertControlValue(definition.cwd, 'Working directory');
   }
 
-  const child = spawn(definition.command, {
-    cwd: definition.cwd,
-    env: createProcessEnvironment(undefined),
-    shell: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-    signal: invocation.signal,
-  });
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(definition.command, {
+      cwd: definition.cwd,
+      env: createProcessEnvironment(undefined),
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      signal: invocation.signal,
+    });
+  } catch (error) {
+    return Promise.reject(
+      new ProcessExecutionError('Unable to launch exceptional shell command', error),
+    );
+  }
   const childStdout = child.stdout;
   const childStderr = child.stderr;
   if (childStdout === null || childStderr === null) {
