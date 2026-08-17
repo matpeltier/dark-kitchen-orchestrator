@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -7,8 +7,13 @@ import { describe, expect, it } from 'vitest';
 
 import { createRepositoryId, createTaskId } from '@dark-kitchen/core';
 
-import { GitHubApiError, GitHubScmAdapter, buildGitHubPullRequestContent } from './index.js';
-import type { GitHubApiClient } from './index.js';
+import {
+  GitHubApiError,
+  GitHubScmAdapter,
+  buildGitHubPullRequestContent,
+  pushGitBranch,
+} from './index.js';
+import type { GitHubApiClient, GitHubGitExecutor } from './index.js';
 
 interface FakePullRequest {
   readonly number: number;
@@ -117,6 +122,7 @@ describe('GitHub SCM adapter', () => {
       readonly remoteUrl: string;
       readonly branch: string;
       readonly commitSha: string;
+      readonly worktreePath: string;
       readonly force: boolean;
     }[] = [];
     const adapter = new GitHubScmAdapter({
@@ -141,6 +147,7 @@ describe('GitHub SCM adapter', () => {
       repositoryId: repository.id,
       branch: 'feature/task-1',
       commitSha: 'head-sha',
+      worktreePath: process.cwd(),
     });
     expect(branch.commitSha).toBe('head-sha');
     expect(gitPushes).toEqual([
@@ -148,6 +155,7 @@ describe('GitHub SCM adapter', () => {
         remoteUrl: 'https://github.com/acme/kitchen.git',
         branch: 'feature/task-1',
         commitSha: 'head-sha',
+        worktreePath: process.cwd(),
         force: false,
       },
     ]);
@@ -199,12 +207,217 @@ describe('GitHub SCM adapter', () => {
           repositoryId: repository.id,
           branch: 'feature/task-1',
           commitSha: 'unknown-sha',
+          worktreePath: remotePath,
         }),
       ).rejects.toThrow('unknown-sha');
       expect(api.requests.some((request) => request.path.endsWith('/git/refs'))).toBe(false);
     } finally {
       rmSync(remotePath, { recursive: true, force: true });
     }
+  });
+
+  it('pushes a verified commit from the supplied worktree when the process cwd is unrelated', async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), 'scm-github-worktree-'));
+    const remotePath = join(rootPath, 'remote.git');
+    const repositoryPath = join(rootPath, 'repository');
+    const worktreePath = join(rootPath, 'worktree');
+    const unrelatedPath = mkdtempSync(join(tmpdir(), 'scm-github-unrelated-'));
+    mkdirSync(repositoryPath);
+    execFileSync('git', ['init', '--bare', remotePath], { stdio: 'ignore' });
+    execFileSync('git', ['init', repositoryPath], { stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test User'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+    writeFileSync(join(repositoryPath, 'README.md'), 'worktree commit\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: repositoryPath, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'worktree commit'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+    const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repositoryPath,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync('git', ['worktree', 'add', '--detach', worktreePath, 'HEAD'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+
+    const api = new GitHubApiFixture();
+    api.remoteUrl = remotePath;
+    const adapter = new GitHubScmAdapter({ api });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    let pushedCommitSha: string;
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(unrelatedPath);
+      await adapter.pushBranch({
+        repositoryId: repository.id,
+        branch: 'feature/task-1',
+        commitSha,
+        worktreePath,
+      });
+      pushedCommitSha = execFileSync(
+        'git',
+        ['--git-dir', remotePath, 'rev-parse', 'refs/heads/feature/task-1'],
+        { encoding: 'utf8' },
+      ).trim();
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(rootPath, { recursive: true, force: true });
+      rmSync(unrelatedPath, { recursive: true, force: true });
+    }
+
+    expect(pushedCommitSha).toBe(commitSha);
+  });
+
+  it('rejects an empty commit SHA without deleting an existing remote branch', async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), 'scm-github-invalid-sha-'));
+    const remotePath = join(rootPath, 'remote.git');
+    const repositoryPath = join(rootPath, 'repository');
+    const worktreePath = join(rootPath, 'worktree');
+    mkdirSync(repositoryPath);
+    execFileSync('git', ['init', '--bare', remotePath], { stdio: 'ignore' });
+    execFileSync('git', ['init', repositoryPath], { stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test User'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+    writeFileSync(join(repositoryPath, 'README.md'), 'existing branch\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: repositoryPath, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'existing branch'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+    const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repositoryPath,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync('git', ['worktree', 'add', '--detach', worktreePath, 'HEAD'], {
+      cwd: repositoryPath,
+      stdio: 'ignore',
+    });
+
+    const api = new GitHubApiFixture();
+    api.remoteUrl = remotePath;
+    const adapter = new GitHubScmAdapter({ api });
+    const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    await adapter.pushBranch({
+      repositoryId: repository.id,
+      branch: 'feature/task-1',
+      commitSha,
+      worktreePath,
+    });
+    const existingBranchSha = execFileSync(
+      'git',
+      ['--git-dir', remotePath, 'rev-parse', 'refs/heads/feature/task-1'],
+      { encoding: 'utf8' },
+    ).trim();
+
+    await expect(
+      adapter.pushBranch({
+        repositoryId: repository.id,
+        branch: 'feature/task-1',
+        commitSha: '',
+        worktreePath,
+      }),
+    ).rejects.toThrow('Git commit SHA must not be empty');
+    expect(
+      execFileSync('git', ['--git-dir', remotePath, 'rev-parse', 'refs/heads/feature/task-1'], {
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe(existingBranchSha);
+    rmSync(rootPath, { recursive: true, force: true });
+  });
+
+  it('uses GitHub HTTP Basic x-access-token authentication for Git pushes', async () => {
+    const commitSha = 'a'.repeat(40);
+    const worktreePath = '/tmp/task-worktree';
+    const calls: {
+      readonly args: readonly string[];
+      readonly options: Parameters<GitHubGitExecutor>[2];
+    }[] = [];
+    const runGit: GitHubGitExecutor = async (_file, args, options) => {
+      calls.push({ args, options });
+      return { stdout: `${commitSha}\n`, stderr: '' };
+    };
+
+    await pushGitBranch(
+      {
+        remoteUrl: 'https://github.com/acme/kitchen.git',
+        branch: 'feature/task-1',
+        commitSha,
+        worktreePath,
+        force: false,
+      },
+      { token: 'ghp-test-token' },
+      runGit,
+    );
+
+    expect(calls[0]?.args).toEqual([
+      'rev-parse',
+      '--verify',
+      '--end-of-options',
+      `${commitSha}^{commit}`,
+    ]);
+    expect(calls[1]?.args).toEqual([
+      'push',
+      'https://github.com/acme/kitchen.git',
+      `${commitSha}:refs/heads/feature/task-1`,
+    ]);
+    expect(calls[1]?.options.cwd).toBe(worktreePath);
+    expect(calls[1]?.options.env?.GIT_CONFIG_VALUE_0).toBe(
+      `AUTHORIZATION: basic ${Buffer.from('x-access-token:ghp-test-token').toString('base64')}`,
+    );
+  });
+
+  it('does not reuse branch-pushed event IDs across adapter instances', async () => {
+    const api = new GitHubApiFixture();
+    const eventIds: string[] = [];
+    const options = {
+      api,
+      gitPush: async () => undefined,
+      eventPublisher: {
+        publish: async (event: { readonly id: string }) => {
+          eventIds.push(event.id);
+        },
+      },
+    };
+    const firstAdapter = new GitHubScmAdapter(options);
+    const secondAdapter = new GitHubScmAdapter(options);
+    const firstRepository = await firstAdapter.getRepository({
+      provider: 'github',
+      id: 'acme/kitchen',
+    });
+    const secondRepository = await secondAdapter.getRepository({
+      provider: 'github',
+      id: 'acme/kitchen',
+    });
+
+    await firstAdapter.pushBranch({
+      repositoryId: firstRepository.id,
+      branch: 'feature/task-1',
+      commitSha: 'head-sha',
+      worktreePath: process.cwd(),
+    });
+    await secondAdapter.pushBranch({
+      repositoryId: secondRepository.id,
+      branch: 'feature/task-1',
+      commitSha: 'head-sha',
+      worktreePath: process.cwd(),
+    });
+
+    expect(eventIds).toHaveLength(2);
+    expect(new Set(eventIds).size).toBe(2);
   });
 
   it('refuses to merge when a required check fails', async () => {

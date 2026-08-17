@@ -76,6 +76,8 @@ export interface PushBranchInput {
   readonly repositoryId: RepositoryId;
   readonly branch: string;
   readonly commitSha: string;
+  /** The task worktree containing the commit to push. */
+  readonly worktreePath: string;
   readonly force?: boolean;
 }
 

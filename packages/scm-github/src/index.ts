@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
+import type { ExecFileOptions } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import {
@@ -51,6 +53,7 @@ export interface GitHubScmAdapterOptions {
   readonly pollIntervalMs?: number;
   readonly now?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly eventId?: () => string;
   readonly gitPush?: (input: GitHubGitPushInput) => Promise<void>;
 }
 
@@ -58,8 +61,15 @@ export interface GitHubGitPushInput {
   readonly remoteUrl: string;
   readonly branch: string;
   readonly commitSha: string;
+  readonly worktreePath: string;
   readonly force: boolean;
 }
+
+export type GitHubGitExecutor = (
+  file: string,
+  args: readonly string[],
+  options: Pick<ExecFileOptions, 'cwd' | 'env'>,
+) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
 interface GitHubRepositoryResponse {
   readonly full_name: string;
@@ -274,12 +284,13 @@ export class GitHubScmAdapter implements ScmAdapter {
   private readonly now: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly gitPush: (input: GitHubGitPushInput) => Promise<void>;
-  private eventSequence = 0;
+  private readonly eventId: () => string;
 
   public constructor(options: GitHubScmAdapterOptions = {}) {
     this.api = options.api ?? new GitHubHttpClient(options);
     this.eventPublisher = options.eventPublisher;
     this.now = options.now ?? Date.now;
+    this.eventId = options.eventId ?? randomUUID;
     this.sleep =
       options.sleep ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -352,13 +363,15 @@ export class GitHubScmAdapter implements ScmAdapter {
   public async pushBranch(input: PushBranchInput): Promise<Branch> {
     const repository = await this.getCachedRepository(input.repositoryId);
     const branch = normalizeBranchName(input.branch);
+    const commitSha = requireText(input.commitSha, 'Git commit SHA').trim();
+    const worktreePath = requireText(input.worktreePath, 'Git worktree path');
     await this.gitPush({
       remoteUrl: requireText(repository.remoteUrl, 'GitHub repository remote URL'),
       branch,
-      commitSha: input.commitSha,
+      commitSha,
+      worktreePath,
       force: input.force ?? false,
     });
-    const commitSha = input.commitSha;
     const pushedBranch: Branch = { repositoryId: repository.id, name: branch, commitSha };
     await this.publish({
       id: this.nextEventId('branch-pushed'),
@@ -678,8 +691,7 @@ export class GitHubScmAdapter implements ScmAdapter {
   }
 
   private nextEventId(kind: string): ReturnType<typeof createEventId> {
-    this.eventSequence += 1;
-    return createEventId(`github:${kind}:${this.eventSequence}`);
+    return createEventId(`github:${kind}:${this.eventId()}`);
   }
 
   private timestamp(): string {
@@ -796,12 +808,23 @@ function firstNonEmpty(...values: readonly (string | null | undefined)[]): strin
 }
 
 const execFile = promisify(execFileCallback);
+const defaultGitExecutor: GitHubGitExecutor = (file, args, options) =>
+  execFile(file, [...args], options);
 
-async function pushGitBranch(
+export async function pushGitBranch(
   input: GitHubGitPushInput,
   options: { readonly token: string | undefined },
+  runGit: GitHubGitExecutor = defaultGitExecutor,
 ): Promise<void> {
-  const refspec = `${input.force ? '+' : ''}${input.commitSha}:refs/heads/${input.branch}`;
+  const commitSha = requireText(input.commitSha, 'Git commit SHA').trim();
+  const worktreePath = requireText(input.worktreePath, 'Git worktree path');
+  const resolvedCommit = await runGit(
+    'git',
+    ['rev-parse', '--verify', '--end-of-options', `${commitSha}^{commit}`],
+    { cwd: worktreePath },
+  );
+  const verifiedCommitSha = requireVerifiedCommitSha(resolvedCommit.stdout);
+  const refspec = `${input.force ? '+' : ''}${verifiedCommitSha}:refs/heads/${input.branch}`;
   const env =
     options.token === undefined
       ? undefined
@@ -809,9 +832,12 @@ async function pushGitBranch(
           ...process.env,
           GIT_CONFIG_COUNT: '1',
           GIT_CONFIG_KEY_0: 'http.extraheader',
-          GIT_CONFIG_VALUE_0: `AUTHORIZATION: bearer ${options.token}`,
+          GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${options.token}`).toString('base64')}`,
         };
-  await execFile('git', ['push', input.remoteUrl, refspec], { env });
+  await runGit('git', ['push', input.remoteUrl, refspec], {
+    cwd: worktreePath,
+    ...(env === undefined ? {} : { env }),
+  });
 }
 
 function mergeChecks(
@@ -897,6 +923,14 @@ function requireText(value: string | null | undefined, label: string): string {
     throw new ScmMergeError(`${label} must not be empty.`);
   }
   return value;
+}
+
+function requireVerifiedCommitSha(value: string): string {
+  const commitSha = value.trim();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+    throw new ScmMergeError('Git commit SHA did not resolve to a commit object.');
+  }
+  return commitSha;
 }
 
 function nonNegativeFinite(value: number, label: string): number {
