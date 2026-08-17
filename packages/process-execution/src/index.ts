@@ -95,7 +95,9 @@ function toBytes(data: string | Uint8Array): Uint8Array {
     return new TextEncoder().encode(data);
   }
 
-  return data.slice();
+  // `Buffer.prototype.slice()` is a view, so use the Uint8Array constructor to
+  // snapshot Buffer-backed payloads before they cross the process boundary.
+  return new Uint8Array(data);
 }
 
 export interface StdinPayload {

@@ -47,6 +47,15 @@ const echoJsonStdin = defineProcess({
 });
 
 describe('safe process execution', () => {
+  it('snapshots Buffer-backed payloads when the transport is created', () => {
+    const source = Buffer.from('payload before mutation');
+    const payload = stdinPayload(source);
+
+    source[0] = 'X'.charCodeAt(0);
+
+    expect(Buffer.from(payload.bytes)).toEqual(Buffer.from('payload before mutation'));
+  });
+
   it('round-trips shell-looking, unicode, newline, null, and JSON edge bytes as opaque data', async () => {
     const payload = Buffer.from(
       'single \' double " newline\nUnicode: café 🥣\n$HOME `whoami` $(touch nope) ; && || > < | \\0 null-like {"value":null}',
