@@ -365,7 +365,7 @@ async function executeWorkflow(
   basePath: string,
 ): Promise<unknown> {
   const occurrences = new Map<string, number>();
-  let nextNestedInvocation = 0;
+  const nestedInvocations = new Map<string, number>();
   const phases = {
     current: undefined as string | undefined,
     phase(title: unknown): void {
@@ -437,7 +437,9 @@ async function executeWorkflow(
   };
   const workflow = (ref: unknown, nestedArgs?: unknown): Promise<unknown> => {
     const normalizedRef = toWorkflowRef(ref);
-    const invocation = ++nextNestedInvocation;
+    const invocationKey = workflowRefKey(normalizedRef);
+    const invocation = (nestedInvocations.get(invocationKey) ?? 0) + 1;
+    nestedInvocations.set(invocationKey, invocation);
     return context.runNested(normalizedRef, nestedArgs, workflowPath, depth, invocation);
   };
   const budget: WorkflowBudget = Object.freeze({
@@ -671,6 +673,12 @@ function toWorkflowRef(value: unknown): WorkflowRef {
     }
   }
   throw new WorkflowInputError('workflow() expects a workflow name or reference object');
+}
+
+function workflowRefKey(ref: WorkflowRef): string {
+  if (typeof ref === 'string') return `name:${ref}`;
+  if (ref.name !== undefined) return `name:${ref.name}`;
+  return `script:${ref.scriptPath ?? ''}`;
 }
 
 function resolveWorkflowImport(specifier: string, basePath: string): string {

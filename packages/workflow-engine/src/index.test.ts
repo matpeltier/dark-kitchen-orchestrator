@@ -188,6 +188,33 @@ return { child }
     expect(runner.calls[0]?.workflowPath).toBe('parent/child');
   });
 
+  it('keeps nested invocation identities independent per child workflow', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('first-child')}
+return agent('first', { role: 'child-worker' })
+`);
+    registry.register(`${meta('second-child')}
+return agent('second', { role: 'child-worker' })
+`);
+    const runner = new ScriptedHarnessRunner((call) => call.workflowPath);
+    const result = await runWorkflow(
+      `${meta('independent-parent')}
+const first = await workflow('first-child')
+const second = await workflow('second-child')
+const repeated = await workflow('first-child')
+return { first, second, repeated }
+`,
+      { runner, resolveWorkflow: registry.resolve.bind(registry) },
+    );
+
+    expect(result.result).toEqual({
+      first: 'independent-parent/first-child',
+      second: 'independent-parent/second-child',
+      repeated: 'independent-parent/first-child#2',
+    });
+    expect(new Set(runner.calls.map((call) => call.cacheKey)).size).toBe(3);
+  });
+
   it('gives repeated nested workflow invocations distinct journal identities', async () => {
     const registry = new WorkflowRegistry();
     registry.register(`${meta('repeated-child')}
