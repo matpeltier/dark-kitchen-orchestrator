@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 
 import {
@@ -60,7 +62,13 @@ interface RuntimeContext {
     workflowPath: string,
     occurrences: Map<string, number>,
   ): Promise<unknown>;
-  runNested(ref: unknown, args: unknown, parentPath: string, depth: number): Promise<unknown>;
+  runNested(
+    ref: unknown,
+    args: unknown,
+    parentPath: string,
+    depth: number,
+    invocation: number,
+  ): Promise<unknown>;
 }
 
 export async function runWorkflow<T = unknown>(
@@ -81,6 +89,7 @@ export async function runWorkflow<T = unknown>(
       options.args,
       parsed.meta.name,
       0,
+      options.cwd ?? process.cwd(),
     );
     assertSerializable(result);
     return {
@@ -96,7 +105,6 @@ export async function runWorkflow<T = unknown>(
     };
   } finally {
     context.internalAbort.abort();
-    await Promise.allSettled([...context.inFlight]);
   }
 }
 
@@ -141,7 +149,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     throwIfAborted(options.signal, signal);
     const taskPrompt = requireString(prompt, 'agent prompt');
     const parsedOptions = normalizeOptions(rawOptions);
-    const role = parsedOptions.role ?? parsedOptions.label ?? `agent-${state.nextAgentIndex + 1}`;
+    const role = requireString(parsedOptions.role, 'agent role');
     const roleKey = `${workflowPath}\u0000${role}`;
     const occurrence = (occurrences.get(roleKey) ?? 0) + 1;
     occurrences.set(roleKey, occurrence);
@@ -179,141 +187,147 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
       cacheKey,
     };
 
-    return context.limiter(async () => {
-      throwIfAborted(options.signal, signal);
-      notify(options, {
-        type: 'agent',
-        role,
-        label,
-        workflowPath,
-        state: 'started',
-        prompt: taskPrompt,
-        options: callOptions,
-        index,
-        key: cacheKey,
-        ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
-      });
-
-      const cached = await options.journal?.get(runId, cacheKey);
-      if (cached) {
+    return abortable(
+      context.limiter(async () => {
         throwIfAborted(options.signal, signal);
-        state.cacheHits += 1;
-        const result = cloneJournalResult(cached);
         notify(options, {
           type: 'agent',
           role,
           label,
           workflowPath,
-          state: 'cached',
-          result,
+          state: 'started',
+          prompt: taskPrompt,
+          options: callOptions,
           index,
           key: cacheKey,
           ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
-          ...(cached.harness === undefined ? {} : { harness: cached.harness }),
-          ...(cached.sessionId === undefined ? {} : { sessionId: cached.sessionId }),
         });
-        return result;
-      }
 
-      const runner = context.runnerResolver(call);
-      let lastError = 'agent failed';
-      for (let attempt = 1; attempt <= context.maxAttempts; attempt += 1) {
-        throwIfAborted(options.signal, signal);
-        let metadata: HarnessRunMetadata = {};
-        const onMeta = (next: HarnessRunMetadata) => {
-          metadata = { ...metadata, ...next };
-          if (next.harness !== undefined || next.sessionId !== undefined) {
+        const cached = await options.journal?.get(runId, cacheKey);
+        if (cached) {
+          throwIfAborted(options.signal, signal);
+          state.cacheHits += 1;
+          const result = cloneJournalResult(cached);
+          notify(options, {
+            type: 'agent',
+            role,
+            label,
+            workflowPath,
+            state: 'cached',
+            result,
+            index,
+            key: cacheKey,
+            ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
+            ...(cached.harness === undefined ? {} : { harness: cached.harness }),
+            ...(cached.sessionId === undefined ? {} : { sessionId: cached.sessionId }),
+          });
+          return result;
+        }
+
+        const runner = context.runnerResolver(call);
+        let lastError = 'agent failed';
+        for (let attempt = 1; attempt <= context.maxAttempts; attempt += 1) {
+          throwIfAborted(options.signal, signal);
+          let metadata: HarnessRunMetadata = {};
+          const onMeta = (next: HarnessRunMetadata) => {
+            metadata = { ...metadata, ...next };
+            if (next.harness !== undefined || next.sessionId !== undefined) {
+              notify(options, {
+                type: 'agent',
+                role,
+                label,
+                workflowPath,
+                state: 'started',
+                index,
+                key: cacheKey,
+                ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
+                ...(metadata.harness === undefined ? {} : { harness: metadata.harness }),
+                ...(metadata.sessionId === undefined ? {} : { sessionId: metadata.sessionId }),
+              });
+            }
+          };
+          const runnerPromise = Promise.resolve().then(() => runner.run(call, signal, onMeta));
+          context.inFlight.add(runnerPromise);
+          runnerPromise
+            .finally(() => context.inFlight.delete(runnerPromise))
+            .catch(() => undefined);
+          try {
+            const rawResult = await abortable(runnerPromise, signal);
+            throwIfAborted(options.signal, signal);
+            const result = normalizeAgentResult(rawResult, callOptions.schema);
+            state.spent += metadata.outputTokens ?? estimateTokens(result);
+            try {
+              await options.journal?.put(journalEntryFromCall(call, result, metadata));
+            } catch (error) {
+              appendLog(
+                options,
+                state,
+                `agent ${label} journal write failed: ${errorMessage(error)}`,
+              );
+            }
             notify(options, {
               type: 'agent',
               role,
               label,
               workflowPath,
-              state: 'started',
+              state: 'completed',
+              result,
               index,
               key: cacheKey,
               ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
               ...(metadata.harness === undefined ? {} : { harness: metadata.harness }),
               ...(metadata.sessionId === undefined ? {} : { sessionId: metadata.sessionId }),
             });
-          }
-        };
-        const runnerPromise = Promise.resolve().then(() => runner.run(call, signal, onMeta));
-        context.inFlight.add(runnerPromise);
-        runnerPromise.finally(() => context.inFlight.delete(runnerPromise)).catch(() => undefined);
-        try {
-          const rawResult = await abortable(runnerPromise, signal);
-          throwIfAborted(options.signal, signal);
-          const result = normalizeAgentResult(rawResult, callOptions.schema);
-          state.spent += metadata.outputTokens ?? estimateTokens(result);
-          try {
-            await options.journal?.put(journalEntryFromCall(call, result, metadata));
+            return result;
           } catch (error) {
-            appendLog(
-              options,
-              state,
-              `agent ${label} journal write failed: ${errorMessage(error)}`,
-            );
-          }
-          notify(options, {
-            type: 'agent',
-            role,
-            label,
-            workflowPath,
-            state: 'completed',
-            result,
-            index,
-            key: cacheKey,
-            ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
-            ...(metadata.harness === undefined ? {} : { harness: metadata.harness }),
-            ...(metadata.sessionId === undefined ? {} : { sessionId: metadata.sessionId }),
-          });
-          return result;
-        } catch (error) {
-          if (error instanceof WorkflowAbortError || signal.aborted) throw new WorkflowAbortError();
-          if (metadata.outputTokens !== undefined) state.spent += metadata.outputTokens;
-          lastError = errorMessage(error);
-          if (attempt < context.maxAttempts) {
-            appendLog(
-              options,
-              state,
-              `agent ${label} attempt ${attempt}/${context.maxAttempts} failed: ${lastError}; retrying`,
-            );
-            await delay(context.retryDelayMs * attempt, signal);
+            if (error instanceof WorkflowAbortError || signal.aborted)
+              throw new WorkflowAbortError();
+            if (metadata.outputTokens !== undefined) state.spent += metadata.outputTokens;
+            lastError = errorMessage(error);
+            if (attempt < context.maxAttempts) {
+              appendLog(
+                options,
+                state,
+                `agent ${label} attempt ${attempt}/${context.maxAttempts} failed: ${lastError}; retrying`,
+              );
+              await delay(context.retryDelayMs * attempt, signal);
+            }
           }
         }
-      }
 
-      appendLog(
-        options,
-        state,
-        `agent ${label} failed after ${context.maxAttempts} attempt(s): ${lastError}`,
-      );
-      const failure: AgentFailure = {
-        role,
-        label,
-        index,
-        key: cacheKey,
-        attempts: context.maxAttempts,
-        error: lastError,
-        ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
-      };
-      state.failures.push(failure);
-      notify(options, {
-        type: 'agent',
-        role,
-        label,
-        workflowPath,
-        state: 'failed',
-        error: lastError,
-        index,
-        key: cacheKey,
-        ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
-      });
-      return null;
-    });
+        appendLog(
+          options,
+          state,
+          `agent ${label} failed after ${context.maxAttempts} attempt(s): ${lastError}`,
+        );
+        const failure: AgentFailure = {
+          role,
+          label,
+          index,
+          key: cacheKey,
+          attempts: context.maxAttempts,
+          error: lastError,
+          ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
+        };
+        state.failures.push(failure);
+        notify(options, {
+          type: 'agent',
+          role,
+          label,
+          workflowPath,
+          state: 'failed',
+          error: lastError,
+          index,
+          key: cacheKey,
+          ...(callOptions.phase === undefined ? {} : { phase: callOptions.phase }),
+        });
+        return null;
+      }),
+      signal,
+    );
   };
 
-  context.runNested = (ref, args, parentPath, depth) => {
+  context.runNested = (ref, args, parentPath, depth, invocation) => {
     const promise = (async () => {
       throwIfAborted(options.signal, signal);
       const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
@@ -329,8 +343,9 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
         parsed.meta,
         context,
         args,
-        `${parentPath}/${childName}`,
+        `${parentPath}/${childName}${invocation === 1 ? '' : `#${invocation}`}`,
         depth + 1,
+        resolved.basePath ?? context.options.cwd ?? process.cwd(),
       );
     })();
     context.inFlight.add(promise);
@@ -347,8 +362,10 @@ async function executeWorkflow(
   args: unknown,
   workflowPath: string,
   depth: number,
+  basePath: string,
 ): Promise<unknown> {
   const occurrences = new Map<string, number>();
+  let nextNestedInvocation = 0;
   const phases = {
     current: undefined as string | undefined,
     phase(title: unknown): void {
@@ -362,7 +379,7 @@ async function executeWorkflow(
     appendLog(context.options, context.state, String(message));
   const agent = (prompt: unknown, options: unknown = {}): Promise<unknown> => {
     const raw = normalizeOptions(options);
-    const withPhase: AgentOptions =
+    const withPhase: ParsedAgentOptions =
       raw.phase === undefined && phases.current !== undefined
         ? { ...raw, phase: phases.current }
         : raw;
@@ -418,8 +435,11 @@ async function executeWorkflow(
       }),
     );
   };
-  const workflow = (ref: unknown, nestedArgs?: unknown): Promise<unknown> =>
-    context.runNested(ref, nestedArgs, workflowPath, depth);
+  const workflow = (ref: unknown, nestedArgs?: unknown): Promise<unknown> => {
+    const normalizedRef = toWorkflowRef(ref);
+    const invocation = ++nextNestedInvocation;
+    return context.runNested(normalizedRef, nestedArgs, workflowPath, depth, invocation);
+  };
   const budget: WorkflowBudget = Object.freeze({
     total: context.tokenBudget ?? null,
     spent: () => context.state.spent,
@@ -450,6 +470,7 @@ async function executeWorkflow(
     'args',
     'budget',
     'cwd',
+    '__workflow_import',
     transpiled,
   );
   return execute(
@@ -461,11 +482,14 @@ async function executeWorkflow(
     log,
     args,
     budget,
-    context.options.cwd ?? process.cwd(),
+    basePath,
+    (specifier: string) => import(resolveWorkflowImport(specifier, basePath)),
   );
 }
 
-function normalizeOptions(raw: unknown): AgentOptions {
+type ParsedAgentOptions = Omit<AgentOptions, 'role'> & { readonly role?: string };
+
+function normalizeOptions(raw: unknown): ParsedAgentOptions {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw))
     throw new WorkflowInputError('agent options must be an object');
@@ -492,8 +516,9 @@ function normalizeOptions(raw: unknown): AgentOptions {
 
 function normalizeAgentResult(result: unknown, schema: JsonSchema | undefined): unknown {
   if (!schema) return result;
-  validateSchema(result, schema, '$');
-  return stripOptionalNulls(result, schema);
+  const normalized = stripOptionalNulls(result, schema);
+  validateSchema(normalized, schema, '$');
+  return normalized;
 }
 
 function validateSchema(value: unknown, schema: JsonSchema, path: string): void {
@@ -646,6 +671,16 @@ function toWorkflowRef(value: unknown): WorkflowRef {
     }
   }
   throw new WorkflowInputError('workflow() expects a workflow name or reference object');
+}
+
+function resolveWorkflowImport(specifier: string, basePath: string): string {
+  if (
+    specifier.startsWith('file:') ||
+    (!specifier.startsWith('.') && !path.isAbsolute(specifier))
+  ) {
+    return specifier;
+  }
+  return pathToFileURL(path.resolve(basePath, specifier)).href;
 }
 
 function requireString(value: unknown, description: string): string {

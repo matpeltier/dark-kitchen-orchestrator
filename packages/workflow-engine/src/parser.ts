@@ -167,7 +167,7 @@ function transformStatement(
   if (ts.isExportDeclaration(statement)) {
     if (statement.isTypeOnly) return '';
     return statement.moduleSpecifier
-      ? `await import(${JSON.stringify(moduleText(statement.moduleSpecifier))});`
+      ? `await __workflow_import(${JSON.stringify(moduleText(statement.moduleSpecifier))});`
       : '';
   }
   if (ts.isExportAssignment(statement)) {
@@ -188,7 +188,7 @@ function transformStatement(
 function transformImport(statement: ts.ImportDeclaration, importIndex: number): string {
   const specifier = moduleText(statement.moduleSpecifier);
   const clause = statement.importClause;
-  if (!clause) return `await import(${JSON.stringify(specifier)});`;
+  if (!clause) return `await __workflow_import(${JSON.stringify(specifier)});`;
   if (clause.isTypeOnly) return '';
   const tempName = `__workflow_import_${importIndex}`;
   const bindings: string[] = [];
@@ -207,7 +207,10 @@ function transformImport(statement: ts.ImportDeclaration, importIndex: number): 
   }
   return bindings.length === 0
     ? ''
-    : [`const ${tempName} = await import(${JSON.stringify(specifier)});`, ...bindings].join('\n');
+    : [
+        `const ${tempName} = await __workflow_import(${JSON.stringify(specifier)});`,
+        ...bindings,
+      ].join('\n');
 }
 
 function moduleText(node: ts.Expression): string {

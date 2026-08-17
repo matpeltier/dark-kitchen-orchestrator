@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import { parseWorkflowScript } from './parser.js';
 export {
@@ -35,7 +36,7 @@ export class WorkflowRegistry {
 
   async resolve(
     ref: import('./types.js').WorkflowRef,
-  ): Promise<{ readonly script: string; readonly name: string }> {
+  ): Promise<{ readonly script: string; readonly name: string; readonly basePath?: string }> {
     const name = typeof ref === 'string' ? ref : ref.name;
     const scriptPath = typeof ref === 'string' ? undefined : ref.scriptPath;
     const workflow = name === undefined ? undefined : this.workflows.get(name);
@@ -43,7 +44,7 @@ export class WorkflowRegistry {
     if (scriptPath !== undefined) {
       const script = await readFile(scriptPath, 'utf8');
       const parsed = parseWorkflowScript(script);
-      return { script, name: parsed.meta.name };
+      return { script, name: parsed.meta.name, basePath: path.dirname(path.resolve(scriptPath)) };
     }
     throw new Error(`Workflow "${name ?? 'unknown'}" not found`);
   }

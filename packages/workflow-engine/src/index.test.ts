@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -9,6 +9,7 @@ import {
   InMemoryWorkflowJournal,
   ScriptedHarnessRunner,
   WorkflowAbortError,
+  WorkflowInputError,
   WorkflowRegistry,
   parseWorkflowScript,
   runWorkflow,
@@ -187,6 +188,100 @@ return { child }
     expect(runner.calls[0]?.workflowPath).toBe('parent/child');
   });
 
+  it('gives repeated nested workflow invocations distinct journal identities', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('repeated-child')}
+return agent(args.prompt, { role: 'child-worker' })
+`);
+    const journal = new InMemoryWorkflowJournal();
+    const script = `${meta('repeated-parent')}
+const sequential = [
+  await workflow('repeated-child', { prompt: 'same' }),
+  await workflow('repeated-child', { prompt: 'same' }),
+]
+const parallelResults = await parallel([
+  () => workflow('repeated-child', { prompt: 'same' }),
+  () => workflow('repeated-child', { prompt: 'same' }),
+])
+return { sequential, parallel: parallelResults }
+`;
+    const runner = new ScriptedHarnessRunner((call) => call.workflowPath);
+    const first = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'repeated-nested-run',
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+    const second = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'repeated-nested-run',
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+
+    expect(first.result).toEqual({
+      sequential: ['repeated-parent/repeated-child', 'repeated-parent/repeated-child#2'],
+      parallel: ['repeated-parent/repeated-child#3', 'repeated-parent/repeated-child#4'],
+    });
+    expect(second.result).toEqual(first.result);
+    expect(second.cacheHits).toBe(4);
+    expect(runner.calls).toHaveLength(4);
+    expect(new Set(runner.calls.map((call) => call.cacheKey)).size).toBe(4);
+  });
+
+  it('requires every agent call to provide a semantic role', async () => {
+    await expect(
+      runWorkflow(
+        `${meta('missing-role')}
+return agent('missing role')
+`,
+        { runner: new ScriptedHarnessRunner(() => 'never') },
+      ),
+    ).rejects.toBeInstanceOf(WorkflowInputError);
+  });
+
+  it('resolves workflow imports relative to cwd', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'dark-kitchen-workflow-import-'));
+    try {
+      await writeFile(path.join(directory, 'helper.mjs'), `export const prompt = 'from helper';\n`);
+      const result = await runWorkflow(
+        `${meta('local-import')}
+import { prompt } from './helper.mjs'
+return agent(prompt, { role: 'imported-helper' })
+`,
+        {
+          cwd: directory,
+          runner: new ScriptedHarnessRunner((call) => call.prompt),
+        },
+      );
+
+      expect(result.result).toBe('from helper');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('normalizes optional null structured fields before validation', async () => {
+    const result = await runWorkflow(
+      `${meta('optional-null')}
+return agent('structured', {
+  role: 'structured-worker',
+  schema: {
+    type: 'object',
+    properties: { required: { type: 'string' }, optional: { type: 'string' } },
+    required: ['required'],
+  },
+})
+`,
+      {
+        runner: new ScriptedHarnessRunner(() => ({ required: 'ok', optional: null })),
+      },
+    );
+
+    expect(result.result).toEqual({ required: 'ok' });
+    expect(result.failures).toEqual([]);
+  });
+
   it('cancels an in-flight runner', async () => {
     const controller = new AbortController();
     const runner = new ScriptedHarnessRunner(
@@ -203,6 +298,29 @@ return agent('long task', { role: 'slow-worker' })
 `,
       { runner, signal: controller.signal },
     );
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
+  });
+
+  it('does not wait for a runner that ignores cancellation', async () => {
+    const controller = new AbortController();
+    let startedResolve: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    const runner = new ScriptedHarnessRunner(
+      () =>
+        new Promise<never>(() => {
+          startedResolve?.();
+        }),
+    );
+    const pending = runWorkflow(
+      `${meta('uncancellable')}
+return agent('long task', { role: 'uncancellable-worker' })
+`,
+      { runner, signal: controller.signal },
+    );
+    await started;
     controller.abort();
     await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
   });

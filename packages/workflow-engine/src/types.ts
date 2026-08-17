@@ -32,7 +32,7 @@ export interface WorkflowMeta {
 /** Options that describe the work, not the harness that will execute it. */
 export interface AgentOptions {
   /** Stable, semantic responsibility for this call, for example `review` or `summarize`. */
-  readonly role?: string;
+  readonly role: string;
   /** Human-facing label; it is not used to select a model or harness. */
   readonly label?: string;
   readonly phase?: string;
@@ -78,7 +78,11 @@ export type WorkflowRunnerResolver = HarnessRunnerResolver;
 export type WorkflowRef = string | { readonly name?: string; readonly scriptPath?: string };
 
 export interface WorkflowResolver {
-  (ref: WorkflowRef): Promise<{ readonly script: string; readonly name?: string }>;
+  (ref: WorkflowRef): Promise<{
+    readonly script: string;
+    readonly name?: string;
+    readonly basePath?: string;
+  }>;
 }
 
 export interface WorkflowBudget {
