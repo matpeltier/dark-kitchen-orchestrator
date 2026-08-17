@@ -3,7 +3,7 @@
   "pollIntervalSeconds": 15,
   "autoMerge": true,
   "baseBranch": "main",
-  "workflowCommand": "codex-workflow",
+  "workflowCommand": "/home/orca/.local/bin/codex-workflow",
   "workflowFile": ".factory/workflows/issue.ts",
   "workflowConfig": ".factory/codex-workflow.config.ts",
   "maxWorkflowRetries": 1,
@@ -11,18 +11,18 @@
   "providers": {
     "architect": {
       "backend": "codex",
-      "model": "gpt-5.6-luna",
-      "reasoning": "high"
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
     },
     "implementer": {
       "backend": "codex",
       "model": "gpt-5.6-luna",
-      "reasoning": "medium"
+      "reasoning": "xhigh"
     },
     "reviewer": {
       "backend": "codex",
-      "model": "gpt-5.6-luna",
-      "reasoning": "high"
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
     }
   },
   "version": 3,
