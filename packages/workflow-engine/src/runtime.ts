@@ -87,7 +87,7 @@ export async function runWorkflow<T = unknown>(
       parsed.meta,
       context,
       options.args,
-      parsed.meta.name,
+      encodeWorkflowPathComponent(parsed.meta.name),
       0,
       options.cwd ?? process.cwd(),
     );
@@ -343,7 +343,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
         parsed.meta,
         context,
         args,
-        `${parentPath}/${childName}${invocation === 1 ? '' : `#${invocation}`}`,
+        `${parentPath}/${encodeWorkflowPathComponent(childName)}${invocation === 1 ? '' : `#${invocation}`}`,
         depth + 1,
         resolved.basePath ?? context.options.cwd ?? process.cwd(),
       );
@@ -383,7 +383,11 @@ async function executeWorkflow(
       raw.phase === undefined && phases.current !== undefined
         ? { ...raw, phase: phases.current }
         : raw;
-    return context.runAgent(prompt, withPhase, workflowPath, occurrences);
+    const promise = context.runAgent(prompt, withPhase, workflowPath, occurrences);
+    context.inFlight.add(promise);
+    promise.catch(() => undefined);
+    promise.finally(() => context.inFlight.delete(promise)).catch(() => undefined);
+    return promise;
   };
   const parallel = async (thunks: unknown): Promise<unknown[]> => {
     if (
@@ -679,6 +683,10 @@ function workflowRefKey(ref: WorkflowRef): string {
   if (typeof ref === 'string') return `name:${ref}`;
   if (ref.name !== undefined) return `name:${ref.name}`;
   return `script:${ref.scriptPath ?? ''}`;
+}
+
+function encodeWorkflowPathComponent(value: string): string {
+  return value.replaceAll('%', '%25').replaceAll('/', '%2F').replaceAll('#', '%23');
 }
 
 function resolveWorkflowImport(specifier: string, basePath: string): string {

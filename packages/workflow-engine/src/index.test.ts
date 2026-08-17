@@ -256,6 +256,46 @@ return { sequential, parallel: parallelResults }
     expect(new Set(runner.calls.map((call) => call.cacheKey)).size).toBe(4);
   });
 
+  it('keeps delimiter-bearing nested workflow names distinct in the journal', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('child')}
+return agent('same', { role: 'child-worker' })
+`);
+    registry.register(`${meta('child#2')}
+return agent('same', { role: 'child-worker' })
+`);
+    const journal = new InMemoryWorkflowJournal();
+    const script = `${meta('delimiter-parent')}
+const first = await workflow('child')
+const delimiterBearing = await workflow('child#2')
+const repeated = await workflow('child')
+return { first, delimiterBearing, repeated }
+`;
+    const runner = new ScriptedHarnessRunner((call) => call.workflowPath);
+    const first = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'delimiter-nested-run',
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+    const second = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'delimiter-nested-run',
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+
+    expect(first.result).toEqual({
+      first: 'delimiter-parent/child',
+      delimiterBearing: 'delimiter-parent/child%232',
+      repeated: 'delimiter-parent/child#2',
+    });
+    expect(first.cacheHits).toBe(0);
+    expect(second.result).toEqual(first.result);
+    expect(second.cacheHits).toBe(3);
+    expect(runner.calls).toHaveLength(3);
+  });
+
   it('requires every agent call to provide a semantic role', async () => {
     await expect(
       runWorkflow(
@@ -283,6 +323,30 @@ return agent(prompt, { role: 'imported-helper' })
       );
 
       expect(result.result).toBe('from helper');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves dynamic workflow imports relative to cwd', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'dark-kitchen-workflow-dynamic-import-'));
+    try {
+      await writeFile(
+        path.join(directory, 'helper.mjs'),
+        `export const prompt = 'from dynamic helper';\n`,
+      );
+      const result = await runWorkflow(
+        `${meta('dynamic-local-import')}
+const helper = await import('./helper.mjs')
+return agent(helper.prompt, { role: 'dynamic-imported-helper' })
+`,
+        {
+          cwd: directory,
+          runner: new ScriptedHarnessRunner((call) => call.prompt),
+        },
+      );
+
+      expect(result.result).toBe('from dynamic helper');
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -350,6 +414,35 @@ return agent('long task', { role: 'uncancellable-worker' })
     await started;
     controller.abort();
     await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
+  });
+
+  it('cancels fire-and-forget agents during successful teardown without unhandled rejection', async () => {
+    let started = false;
+    let aborted = false;
+    const runner = new ScriptedHarnessRunner(
+      (_call, signal) =>
+        new Promise<never>((_resolve, reject) => {
+          started = true;
+          const onAbort = () => {
+            aborted = true;
+            reject(new Error('aborted'));
+          };
+          if (signal?.aborted) return onAbort();
+          signal?.addEventListener('abort', onAbort, { once: true });
+        }),
+    );
+
+    const result = await runWorkflow(
+      `${meta('fire-and-forget')}
+agent('long running', { role: 'leak' })
+return { ok: true }
+`,
+      { runner },
+    );
+
+    expect(result.result).toEqual({ ok: true });
+    expect(started).toBe(true);
+    expect(aborted).toBe(true);
   });
 
   it('parses literal metadata and rejects executable metadata', () => {

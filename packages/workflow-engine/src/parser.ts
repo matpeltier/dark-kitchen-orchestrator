@@ -170,19 +170,49 @@ function transformStatement(
       ? `await __workflow_import(${JSON.stringify(moduleText(statement.moduleSpecifier))});`
       : '';
   }
+  const rewritten = rewriteDynamicImports(script, sourceFile, statement);
   if (ts.isExportAssignment(statement)) {
-    return `const __workflow_default_export = ${script.slice(statement.expression.getStart(sourceFile), statement.expression.end)};`;
+    const statementStart = statement.getStart(sourceFile);
+    const expressionStart = statement.expression.getStart(sourceFile) - statementStart;
+    const expressionEnd = statement.expression.end - statementStart;
+    return `const __workflow_default_export = ${rewritten.slice(expressionStart, expressionEnd)};`;
   }
   if (hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
-    const text = script
-      .slice(statement.getStart(sourceFile), statement.end)
-      .replace(/^export\s+/, '');
+    const text = rewritten.replace(/^export\s+/, '');
     if (hasModifier(statement, ts.SyntaxKind.DefaultKeyword) && anonymousDeclaration(statement)) {
       return `const __workflow_default_export = ${text.replace(/^default\s+/, '')};`;
     }
     return text.replace(/^default\s+/, '');
   }
-  return script.slice(statement.getStart(sourceFile), statement.end);
+  return rewritten;
+}
+
+function rewriteDynamicImports(
+  script: string,
+  sourceFile: ts.SourceFile,
+  statement: ts.Statement,
+): string {
+  const replacements: Array<{ readonly start: number; readonly end: number }> = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      replacements.push({
+        start: node.expression.getStart(sourceFile),
+        end: node.expression.end,
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(statement);
+  if (replacements.length === 0) return script.slice(statement.getStart(sourceFile), statement.end);
+
+  let result = '';
+  let cursor = statement.getStart(sourceFile);
+  for (const replacement of replacements.sort((left, right) => left.start - right.start)) {
+    result += script.slice(cursor, replacement.start);
+    result += '__workflow_import';
+    cursor = replacement.end;
+  }
+  return result + script.slice(cursor, statement.end);
 }
 
 function transformImport(statement: ts.ImportDeclaration, importIndex: number): string {
