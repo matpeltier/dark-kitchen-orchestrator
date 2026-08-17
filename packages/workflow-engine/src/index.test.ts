@@ -256,6 +256,46 @@ return { sequential, parallel: parallelResults }
     expect(new Set(runner.calls.map((call) => call.cacheKey)).size).toBe(4);
   });
 
+  it('assigns parallel nested identities by call order despite resolver completion order', async () => {
+    const child = `${meta('canonical-child')}
+return agent('same', { role: 'child-worker' })
+`;
+    let resolutionCount = 0;
+    const resolveWorkflow = async () => {
+      const invocation = resolutionCount++ % 2;
+      await new Promise((resolve) => setTimeout(resolve, invocation === 0 ? 10 : 0));
+      return { script: child, name: 'canonical-child' };
+    };
+    const journal = new InMemoryWorkflowJournal();
+    const script = `${meta('ordered-parent')}
+return parallel([
+  () => workflow('first'),
+  () => workflow('second'),
+])
+`;
+    const runner = new ScriptedHarnessRunner((call) => call.workflowPath);
+    const first = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'ordered-nested-run',
+      resolveWorkflow,
+    });
+    const second = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'ordered-nested-run',
+      resolveWorkflow,
+    });
+
+    expect(first.result).toEqual([
+      'ordered-parent/canonical-child',
+      'ordered-parent/canonical-child#2',
+    ]);
+    expect(second.result).toEqual(first.result);
+    expect(second.cacheHits).toBe(2);
+    expect(runner.calls).toHaveLength(2);
+  });
+
   it('shares nested invocation identities across name and script aliases', async () => {
     const child = `${meta('canonical-child')}
 return agent('same', { role: 'child-worker' })

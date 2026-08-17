@@ -43,6 +43,18 @@ interface RuntimeState {
   spent: number;
 }
 
+interface NestedInvocation {
+  readonly sequence: number;
+  readonly ready: Promise<void>;
+  readonly markReady: () => void;
+  childName?: string;
+}
+
+interface NestedInvocationState {
+  nextSequence: number;
+  readonly entries: NestedInvocation[];
+}
+
 interface RuntimeContext {
   readonly state: RuntimeState;
   readonly options: WorkflowRunOptions;
@@ -68,7 +80,7 @@ interface RuntimeContext {
     parentPath: string,
     depth: number,
     basePath: string,
-    nestedInvocations: Map<string, number>,
+    nestedInvocations: NestedInvocationState,
   ): Promise<unknown>;
 }
 
@@ -329,32 +341,49 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
   };
 
   context.runNested = (ref, args, parentPath, depth, basePath, nestedInvocations) => {
+    const invocation = reserveNestedInvocation(nestedInvocations);
     const promise = abortable(
       (async () => {
-        throwIfAborted(options.signal, signal);
-        const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
-        if (depth >= maxDepth)
-          throw new WorkflowInputError(
-            `workflow() nesting exceeds the maximum depth of ${maxDepth}`,
+        try {
+          throwIfAborted(options.signal, signal);
+          const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
+          if (depth >= maxDepth)
+            throw new WorkflowInputError(
+              `workflow() nesting exceeds the maximum depth of ${maxDepth}`,
+            );
+          if (!options.resolveWorkflow)
+            throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
+          const resolved = await options.resolveWorkflow(
+            resolveWorkflowRef(toWorkflowRef(ref), basePath),
           );
-        if (!options.resolveWorkflow)
-          throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
-        const resolved = await options.resolveWorkflow(
-          resolveWorkflowRef(toWorkflowRef(ref), basePath),
-        );
-        const parsed = parseWorkflowScript(resolved.script);
-        const childName = resolved.name ?? parsed.meta.name;
-        const invocation = (nestedInvocations.get(childName) ?? 0) + 1;
-        nestedInvocations.set(childName, invocation);
-        return executeWorkflow(
-          parsed.body,
-          parsed.meta,
-          context,
-          args,
-          `${parentPath}/${encodeWorkflowPathComponent(childName)}${invocation === 1 ? '' : `#${invocation}`}`,
-          depth + 1,
-          resolved.basePath ?? context.options.cwd ?? process.cwd(),
-        );
+          const parsed = parseWorkflowScript(resolved.script);
+          const childName = resolved.name ?? parsed.meta.name;
+          invocation.childName = childName;
+
+          // Resolution may complete out of order. Wait for earlier calls to
+          // publish their canonical names before assigning this call's suffix.
+          await Promise.all(
+            nestedInvocations.entries
+              .filter((entry) => entry.sequence < invocation.sequence)
+              .map((entry) => entry.ready),
+          );
+          const occurrence = nestedInvocations.entries.filter(
+            (entry) => entry.sequence <= invocation.sequence && entry.childName === childName,
+          ).length;
+          invocation.markReady();
+
+          return executeWorkflow(
+            parsed.body,
+            parsed.meta,
+            context,
+            args,
+            `${parentPath}/${encodeWorkflowPathComponent(childName)}${occurrence === 1 ? '' : `#${occurrence}`}`,
+            depth + 1,
+            resolved.basePath ?? context.options.cwd ?? process.cwd(),
+          );
+        } finally {
+          invocation.markReady();
+        }
       })(),
       signal,
     );
@@ -376,7 +405,7 @@ async function executeWorkflow(
   basePath: string,
 ): Promise<unknown> {
   const occurrences = new Map<string, number>();
-  const nestedInvocations = new Map<string, number>();
+  const nestedInvocations: NestedInvocationState = { nextSequence: 0, entries: [] };
   const phases = {
     current: undefined as string | undefined,
     phase(title: unknown): void {
@@ -700,6 +729,25 @@ function resolveWorkflowRef(ref: WorkflowRef, basePath: string): WorkflowRef {
     return ref;
   }
   return { ...ref, scriptPath: path.resolve(basePath, ref.scriptPath) };
+}
+
+function reserveNestedInvocation(state: NestedInvocationState): NestedInvocation {
+  let resolveReady: () => void = () => undefined;
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
+  let markedReady = false;
+  const invocation: NestedInvocation = {
+    sequence: state.nextSequence++,
+    ready,
+    markReady: () => {
+      if (markedReady) return;
+      markedReady = true;
+      resolveReady();
+    },
+  };
+  state.entries.push(invocation);
+  return invocation;
 }
 
 function encodeWorkflowPathComponent(value: string): string {
