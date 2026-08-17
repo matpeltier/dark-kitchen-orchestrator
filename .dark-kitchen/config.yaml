@@ -1,0 +1,4 @@
+# Dark Kitchen configuration schema placeholder.
+# This file documents the versioned configuration shape only; it has no runtime behavior yet.
+version: 1
+schema: {}

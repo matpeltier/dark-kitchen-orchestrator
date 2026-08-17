@@ -1,1 +1,6 @@
-.factory/runtime/
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+*.log
