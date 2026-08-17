@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 /** The only environment value added for a file-backed payload. Its value is a path, not data. */
 export const PAYLOAD_FILE_ENVIRONMENT_VARIABLE = 'DARK_KITCHEN_PAYLOAD_FILE';
@@ -284,6 +285,16 @@ function payloadByteLength(payload: PayloadTransport | undefined): number | unde
   return undefined;
 }
 
+function createProcessEnvironment(payload: PayloadTransport | undefined): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  if (payload?.kind === 'file') {
+    environment[PAYLOAD_FILE_ENVIRONMENT_VARIABLE] = payload.path;
+  } else {
+    delete environment[PAYLOAD_FILE_ENVIRONMENT_VARIABLE];
+  }
+  return environment;
+}
+
 function emitDiagnostic(invocation: ProcessInvocation, diagnostic: ProcessDiagnostic): void {
   invocation.onDiagnostic?.(diagnostic);
 }
@@ -291,17 +302,14 @@ function emitDiagnostic(invocation: ProcessInvocation, diagnostic: ProcessDiagno
 function finishStdin(
   payload: PayloadTransport | undefined,
   stdin: Writable,
-  onSourceError: (error: unknown) => void,
-): Readable | undefined {
+): Promise<void> | undefined {
   if (payload?.kind === 'stdin') {
     stdin.end(Buffer.from(payload.bytes));
     return undefined;
   }
 
   if (payload?.kind === 'stream') {
-    payload.stream.on('error', onSourceError);
-    payload.stream.pipe(stdin);
-    return payload.stream;
+    return pipeline(payload.stream, stdin);
   }
 
   // A file payload is referenced through an environment path. It has no stdin data.
@@ -326,10 +334,7 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
 
   const spawnOptions: Parameters<typeof spawn>[2] = {
     cwd: invocation.cwd,
-    env:
-      payload?.kind === 'file'
-        ? { ...process.env, [PAYLOAD_FILE_ENVIRONMENT_VARIABLE]: payload.path }
-        : process.env,
+    env: createProcessEnvironment(payload),
     shell: false,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
@@ -365,8 +370,6 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
   if (payloadLength !== undefined) {
     diagnosticBase.payloadByteLength = payloadLength;
   }
-
-  emitDiagnostic(invocation, { event: 'started', ...diagnosticBase });
 
   return new Promise<ProcessResult>((resolve, reject) => {
     let settled = false;
@@ -410,7 +413,7 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
       stdinCompleted = true;
     });
     childStdin.once('close', () => {
-      if (!stdinCompleted) {
+      if (!stdinCompleted && payload?.kind !== 'stream') {
         fail(new ProcessExecutionError('Process stdin closed before the payload completed'));
       }
     });
@@ -419,18 +422,15 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
     childStdout.once('error', fail);
     childStderr.once('error', fail);
 
-    try {
-      if (payload?.kind === 'stream') {
-        sourceStream = payload.stream;
+    const reportDiagnostic = (diagnostic: ProcessDiagnostic): boolean => {
+      try {
+        emitDiagnostic(invocation, diagnostic);
+        return true;
+      } catch (error) {
+        fail(error, 'Process diagnostic callback failed');
+        return false;
       }
-      sourceStream =
-        finishStdin(payload, childStdin, (error) => {
-          fail(error, 'Process stdin source failed');
-        }) ?? sourceStream;
-    } catch (error) {
-      fail(error);
-      return;
-    }
+    };
 
     child.once('close', (exitCode, signal) => {
       if (settled) {
@@ -440,13 +440,17 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
         fail(new ProcessExecutionError('Process exited before the payload completed'));
         return;
       }
+      if (
+        !reportDiagnostic({
+          event: 'finished',
+          ...diagnosticBase,
+          exitCode,
+          signal,
+        })
+      ) {
+        return;
+      }
       settled = true;
-      emitDiagnostic(invocation, {
-        event: 'finished',
-        ...diagnosticBase,
-        exitCode,
-        signal,
-      });
       resolve({
         exitCode,
         signal,
@@ -454,6 +458,32 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
         stderr: Buffer.concat(stderr),
       });
     });
+
+    if (
+      !reportDiagnostic({
+        event: 'started',
+        ...diagnosticBase,
+      })
+    ) {
+      return;
+    }
+
+    try {
+      if (payload?.kind === 'stream') {
+        sourceStream = payload.stream;
+      }
+      const transfer = finishStdin(payload, childStdin);
+      transfer?.then(
+        () => {
+          stdinCompleted = true;
+        },
+        (error: unknown) => {
+          fail(error, 'Process stdin source failed');
+        },
+      );
+    } catch (error) {
+      fail(error);
+    }
   });
 }
 
@@ -536,6 +566,7 @@ export function executeExceptionalShell(
 
   const child = spawn(definition.command, {
     cwd: definition.cwd,
+    env: createProcessEnvironment(undefined),
     shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,

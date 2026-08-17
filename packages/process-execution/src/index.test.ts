@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises';
+import { access, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
@@ -106,6 +106,102 @@ describe('safe process execution', () => {
     });
     expect(source.destroyed).toBe(true);
   });
+
+  it('rejects when a stream closes before emitting end', async () => {
+    const source = new Readable({
+      read(): void {
+        this.push(Buffer.from('partial payload'));
+        this.destroy();
+      },
+    });
+    const definition = defineProcess({
+      executable: process.execPath,
+      args: controlArgs('-e', 'process.stdin.resume()'),
+    });
+
+    await expect(
+      executeProcess({ definition, payload: streamPayload(source) }),
+    ).rejects.toBeInstanceOf(ProcessExecutionError);
+    expect(source.destroyed).toBe(true);
+  });
+
+  it('rejects and terminates the child when the started diagnostic fails', async () => {
+    const callbackError = new Error('started diagnostic failed');
+    const marker = join(tmpdir(), `dark-kitchen-started-callback-${process.pid}-${Date.now()}`);
+    const definition = defineProcess({
+      executable: process.execPath,
+      args: controlArgs(
+        '-e',
+        `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'orphaned'), 100); process.stdin.resume()`,
+      ),
+    });
+
+    try {
+      await expect(
+        executeProcess({
+          definition,
+          onDiagnostic: () => {
+            throw callbackError;
+          },
+        }),
+      ).rejects.toMatchObject({ name: 'ProcessExecutionError', cause: callbackError });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await expect(access(marker)).rejects.toThrow();
+    } finally {
+      await rm(marker, { force: true });
+    }
+  });
+
+  it('rejects when the finished diagnostic fails', async () => {
+    const callbackError = new Error('finished diagnostic failed');
+    const events: string[] = [];
+
+    await expect(
+      executeProcess({
+        definition: echoStdin,
+        onDiagnostic: (diagnostic) => {
+          events.push(diagnostic.event);
+          if (diagnostic.event === 'finished') {
+            throw callbackError;
+          }
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'ProcessExecutionError', cause: callbackError });
+    expect(events).toEqual(['started', 'finished']);
+  });
+
+  it('removes inherited payload artifact variables from non-file transports', async () => {
+    const previousValue = process.env[PAYLOAD_FILE_ENVIRONMENT_VARIABLE];
+    process.env[PAYLOAD_FILE_ENVIRONMENT_VARIABLE] = '/tmp/stale-dark-kitchen-payload.bin';
+    const printPayloadEnvironment = defineProcess({
+      executable: process.execPath,
+      args: controlArgs(
+        '-e',
+        `process.stdout.write(process.env.${PAYLOAD_FILE_ENVIRONMENT_VARIABLE} ?? 'missing')`,
+      ),
+    });
+    const shellDefinition = defineExceptionalShell({
+      command: trustedShellCommand(
+        `printenv ${PAYLOAD_FILE_ENVIRONMENT_VARIABLE} || printf missing`,
+      ),
+      policy: allowExceptionalShell('environment isolation test'),
+    });
+
+    try {
+      const processResult = await executeProcess({ definition: printPayloadEnvironment });
+      const shellResult = await executeExceptionalShell({ definition: shellDefinition });
+
+      expect(Buffer.from(processResult.stdout).toString('utf8')).toBe('missing');
+      expect(Buffer.from(shellResult.stdout).toString('utf8')).toBe('missing');
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env[PAYLOAD_FILE_ENVIRONMENT_VARIABLE];
+      } else {
+        process.env[PAYLOAD_FILE_ENVIRONMENT_VARIABLE] = previousValue;
+      }
+    }
+  });
 });
 
 interface AdapterContractCase {
@@ -117,23 +213,65 @@ interface AdapterContractCase {
 
 const acpxProfile = defineAcpxLaunchProfile(echoJsonStdin);
 const nativeProfile = defineNativeProcessLaunchProfile(echoJsonStdin);
+
+function createAcpxPayloadInvocation(
+  payload: PayloadTransport,
+  definition: ProcessDefinition = acpxProfile.process,
+): ProcessInvocation {
+  return {
+    ...createAcpxInvocation(defineAcpxLaunchProfile(definition), {
+      prompt: 'shared payload regression',
+    }),
+    payload,
+  };
+}
+
+function createNativePayloadInvocation(
+  payload: PayloadTransport,
+  definition: ProcessDefinition = nativeProfile.process,
+): ProcessInvocation {
+  return createNativeProcessInvocation(defineNativeProcessLaunchProfile(definition), payload);
+}
+
 const adapterContractCases: readonly AdapterContractCase[] = [
   {
     name: 'acpx',
     definition: acpxProfile.process,
-    createInvocation: (payload, definition = acpxProfile.process) => ({ definition, payload }),
+    createInvocation: createAcpxPayloadInvocation,
     createPromptInvocation: (prompt) => createAcpxInvocation(acpxProfile, { prompt }),
   },
   {
     name: 'native',
     definition: nativeProfile.process,
-    createInvocation: (payload, definition = nativeProfile.process) =>
-      definition === nativeProfile.process
-        ? createNativeProcessInvocation(nativeProfile, payload)
-        : { definition, payload },
+    createInvocation: createNativePayloadInvocation,
     createPromptInvocation: (prompt) => createNativeJsonInvocation(nativeProfile, { prompt }),
   },
 ];
+
+describe('ACP/acpx invocation path', () => {
+  it('transports large and hostile prompt/context data through the factory', async () => {
+    const marker = join(tmpdir(), `dark-kitchen-acpx-shell-marker-${process.pid}-${Date.now()}`);
+    const prompt = `${'p'.repeat(512 * 1024)} $(touch ${marker}); echo pwned; "quotes"\n雪\0`;
+    const context = {
+      body: 'c'.repeat(512 * 1024),
+      nullValue: null,
+      shellLooking: `$(touch ${marker}) && rm -rf /`,
+      unicode: 'café 🥣',
+    };
+    const invocation = createAcpxInvocation(acpxProfile, { prompt, context });
+
+    const result = await executeProcess(invocation);
+    const parsed = JSON.parse(Buffer.from(result.stdout).toString('utf8')) as {
+      prompt: string;
+      context: typeof context;
+    };
+
+    expect(result.exitCode).toBe(0);
+    expect(parsed).toEqual({ prompt, context });
+    expect(invocation.definition.args.join(' ')).not.toContain(prompt);
+    await expect(access(marker)).rejects.toThrow();
+  });
+});
 
 for (const adapter of adapterContractCases) {
   describe(`${adapter.name} shared payload contract`, () => {
