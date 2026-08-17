@@ -59,10 +59,11 @@ interface NestedInvocation {
   readonly position: LogicalPosition;
   /** Identity is reserved synchronously, before any resolver or preparation can complete. */
   readonly identity: string;
-  /** Dynamic branches use their logical identity instead of waiting to number display paths. */
+  /** Reference identity is captured before the asynchronous resolver runs. */
+  readonly referenceKey: string;
+  /** Dynamic branches use their logical identity for presentation paths. */
   readonly useLogicalPath: boolean;
-  ready: boolean;
-  readonly markReady: () => void;
+  /** The resolved name is presentation data only; it is never used for journal identity. */
   childName?: string;
 }
 
@@ -88,7 +89,6 @@ interface RuntimeContext {
     rawOptions: unknown,
     workflowPath: string,
     workflowIdentityPath: string,
-    occurrences: Map<string, number>,
     position: LogicalPosition,
   ): Promise<unknown>;
   runNested(
@@ -181,24 +181,15 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     },
   };
 
-  context.runAgent = async (
-    prompt,
-    rawOptions,
-    workflowPath,
-    workflowIdentityPath,
-    occurrences,
-    position,
-  ) => {
+  context.runAgent = async (prompt, rawOptions, workflowPath, workflowIdentityPath, position) => {
     throwIfAborted(options.signal, signal);
     const taskPrompt = requireString(prompt, 'agent prompt');
     const parsedOptions = normalizeOptions(rawOptions);
     const role = requireString(parsedOptions.role, 'agent role');
-    const roleKey = `${workflowPath}\u0000${role}`;
-    const occurrence =
-      position.segments.length === 1
-        ? (occurrences.get(roleKey) ?? 0) + 1
-        : stablePositionNumber(position);
-    if (position.segments.length === 1) occurrences.set(roleKey, occurrence);
+    // This is allocated before any async work starts. Keeping it as the
+    // branch-local ordinal makes the journal identity independent of resolver
+    // completion and parallel arrival order.
+    const occurrence = branchLocalCallOrdinal(position);
     if (state.agentCount >= context.maxAgents) throw new WorkflowAgentCapError();
     if (
       context.tokenBudget !== null &&
@@ -384,61 +375,61 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     nestedInvocations,
     position,
   ) => {
-    const invocation = reserveNestedInvocation(nestedInvocations, position);
+    const normalizedRef = toWorkflowRef(ref);
+    const invocation = reserveNestedInvocation(
+      nestedInvocations,
+      position,
+      workflowReferenceKey(resolveWorkflowRef(normalizedRef, basePath)),
+      position.segments.length > 1,
+    );
     const promise = abortable(
       (async () => {
-        try {
-          throwIfAborted(options.signal, signal);
-          const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
-          if (depth >= maxDepth)
-            throw new WorkflowInputError(
-              `workflow() nesting exceeds the maximum depth of ${maxDepth}`,
-            );
-          if (!options.resolveWorkflow)
-            throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
-          const resolved = await abortable(
-            Promise.resolve().then(() =>
-              options.resolveWorkflow!(resolveWorkflowRef(toWorkflowRef(ref), basePath)),
-            ),
-            signal,
+        throwIfAborted(options.signal, signal);
+        const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
+        if (depth >= maxDepth)
+          throw new WorkflowInputError(
+            `workflow() nesting exceeds the maximum depth of ${maxDepth}`,
           );
-          throwIfAborted(options.signal, signal);
-          const parsed = parseWorkflowScript(resolved.script);
-          const childName = resolved.name ?? parsed.meta.name;
-          invocation.childName = childName;
+        if (!options.resolveWorkflow)
+          throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
+        const resolved = await abortable(
+          Promise.resolve().then(() =>
+            options.resolveWorkflow!(resolveWorkflowRef(normalizedRef, basePath)),
+          ),
+          signal,
+        );
+        throwIfAborted(options.signal, signal);
+        const parsed = parseWorkflowScript(resolved.script);
+        const childName = resolved.name ?? parsed.meta.name;
 
-          const occurrence = nestedInvocations.entries.filter(
-            (entry) =>
-              entry.childName === childName &&
-              compareLogicalPositions(entry.position, invocation.position) <= 0,
-          ).length;
-          const childPath = `${parentPath}/${encodeWorkflowPathComponent(childName)}${
-            invocation.useLogicalPath
-              ? `@${invocation.identity}`
-              : occurrence === 1
-                ? ''
-                : `#${occurrence}`
-          }`;
-          throwIfAborted(options.signal, signal);
-          invocation.markReady();
-          throwIfAborted(options.signal, signal);
+        invocation.childName = childName;
+        const occurrence = nestedInvocations.entries.filter(
+          (entry) =>
+            (entry.childName === childName || entry.referenceKey === invocation.referenceKey) &&
+            compareLogicalPositions(entry.position, invocation.position) <= 0,
+        ).length;
+        const childPath = `${parentPath}/${encodeWorkflowPathComponent(childName)}${
+          invocation.useLogicalPath
+            ? `@${invocation.identity}`
+            : occurrence === 1
+              ? ''
+              : `#${occurrence}`
+        }`;
+        throwIfAborted(options.signal, signal);
 
-          return await abortable(
-            executeWorkflow(
-              parsed.body,
-              parsed.meta,
-              context,
-              args,
-              childPath,
-              `${parentIdentityPath}/${encodeWorkflowPathComponent(childName)}@${invocation.identity}`,
-              depth + 1,
-              resolved.basePath ?? context.options.cwd ?? process.cwd(),
-            ),
-            signal,
-          );
-        } finally {
-          invocation.markReady();
-        }
+        return await abortable(
+          executeWorkflow(
+            parsed.body,
+            parsed.meta,
+            context,
+            args,
+            childPath,
+            `${parentIdentityPath}/${encodeWorkflowPathComponent(childName)}@${invocation.identity}`,
+            depth + 1,
+            resolved.basePath ?? context.options.cwd ?? process.cwd(),
+          ),
+          signal,
+        );
       })(),
       signal,
     );
@@ -460,7 +451,6 @@ async function executeWorkflow(
   depth: number,
   basePath: string,
 ): Promise<unknown> {
-  const occurrences = new Map<string, number>();
   const nestedInvocations: NestedInvocationState = { entries: [] };
   const phases = {
     current: undefined as string | undefined,
@@ -487,7 +477,6 @@ async function executeWorkflow(
       withPhase,
       workflowPath,
       workflowIdentityPath,
-      occurrences,
       position,
     );
     context.inFlight.add(promise);
@@ -546,10 +535,12 @@ async function executeWorkflow(
         return logicalExecution.run(branchContext, async () => {
           let value: unknown = item;
           for (const stage of stages) {
+            throwIfAborted(context.options.signal, context.signal);
             try {
               value = await (
                 stage as (previous: unknown, original: unknown, itemIndex: number) => unknown
               )(value, item, index);
+              throwIfAborted(context.options.signal, context.signal);
             } catch (error) {
               if (isFatal(error)) throw error;
               log(`pipeline item ${index} failed: ${errorMessage(error)}`);
@@ -772,11 +763,30 @@ function combineSignals(first: AbortSignal, second: AbortSignal): AbortSignal {
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(new WorkflowAbortError());
   return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => reject(new WorkflowAbortError());
+    let settled = false;
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new WorkflowAbortError());
+    };
     signal.addEventListener('abort', onAbort, { once: true });
     promise
-      .then(resolve, reject)
-      .finally(() => signal.removeEventListener('abort', onAbort))
+      .then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        },
+      )
       .catch(() => undefined);
   });
 }
@@ -819,23 +829,22 @@ function resolveWorkflowRef(ref: WorkflowRef, basePath: string): WorkflowRef {
   return { ...ref, scriptPath: path.resolve(basePath, ref.scriptPath) };
 }
 
+function workflowReferenceKey(ref: WorkflowRef): string {
+  if (typeof ref === 'string') return `name:${ref}`;
+  return `ref:${JSON.stringify(ref)}`;
+}
+
 function reserveNestedInvocation(
   state: NestedInvocationState,
   position: LogicalPosition,
+  referenceKey: string,
+  useLogicalPath: boolean,
 ): NestedInvocation {
-  const useLogicalPath =
-    position.segments.length > 1 ||
-    state.entries.some(
-      (entry) => compareLogicalPositions(entry.position, position) < 0 && !entry.ready,
-    );
   const invocation: NestedInvocation = {
     position,
     identity: logicalPositionKey(position),
+    referenceKey,
     useLogicalPath,
-    ready: false,
-    markReady: () => {
-      invocation.ready = true;
-    },
   };
   state.entries.push(invocation);
   return invocation;
@@ -872,13 +881,9 @@ function logicalPositionKey(position: LogicalPosition): string {
   return position.segments.join('.');
 }
 
-function stablePositionNumber(position: LogicalPosition): number {
-  let hash = 2166136261;
-  for (const segment of position.segments) {
-    hash ^= segment;
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0 || 1;
+function branchLocalCallOrdinal(position: LogicalPosition): number {
+  const ordinal = position.segments[position.segments.length - 1];
+  return (ordinal ?? 0) + 1;
 }
 
 function encodeWorkflowPathComponent(value: string): string {

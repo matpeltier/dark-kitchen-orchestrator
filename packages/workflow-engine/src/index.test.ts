@@ -737,6 +737,7 @@ return pipeline([1], async () => new Promise(() => {}))
 
   it('does not start a nested workflow after cancellation releases its resolver', async () => {
     const controller = new AbortController();
+    const logs: string[] = [];
     let releaseResolver: (() => void) | undefined;
     let resolverStarted: (() => void) | undefined;
     const started = new Promise<void>((resolve) => {
@@ -763,7 +764,14 @@ return agent('child side effect', { role: 'child-worker' })
       `${meta('released-parent')}
 return workflow('released-child')
 `,
-      { runner, resolveWorkflow, signal: controller.signal },
+      {
+        runner,
+        resolveWorkflow,
+        signal: controller.signal,
+        onProgress: (event) => {
+          if (event.type === 'log') logs.push(event.message);
+        },
+      },
     );
 
     await started;
@@ -772,6 +780,7 @@ return workflow('released-child')
     await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
     await Promise.resolve();
     expect(childStarted).toBe(false);
+    expect(logs).not.toContain('child ran');
   });
 
   it('normalizes optional null structured fields before validation', async () => {
