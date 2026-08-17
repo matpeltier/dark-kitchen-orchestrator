@@ -121,10 +121,10 @@ describe('domain validation', () => {
         [taskA, taskB],
         [
           { ...workspace('workspace-a', taskA), path: '/worktrees/shared' },
-          { ...workspace('workspace-b', taskB), path: '/worktrees/shared' },
+          { ...workspace('workspace-b', taskB), path: '/worktrees/child/../shared' },
         ],
       ),
-    ).toThrow('path /worktrees/shared is shared by multiple tasks');
+    ).toThrow('shared by multiple tasks');
   });
 });
 

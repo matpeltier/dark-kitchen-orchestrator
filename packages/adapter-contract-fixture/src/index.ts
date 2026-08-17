@@ -16,6 +16,8 @@ import type {
   DomainEventType,
   EventId,
   EventSubscription,
+  ExecutionNode,
+  ExecutionNodeId,
   HarnessInput,
   HarnessRuntime,
   Intervention,
@@ -198,6 +200,18 @@ export class ContractRuntimeStore implements RuntimeStore {
 
   public async saveTaskGraph(_taskGraph: TaskGraph): Promise<void> {
     void _taskGraph;
+    return undefined;
+  }
+
+  public async getExecutionNode(
+    _executionNodeId: ExecutionNodeId,
+  ): Promise<ExecutionNode | undefined> {
+    void _executionNodeId;
+    return undefined;
+  }
+
+  public async saveExecutionNode(_executionNode: ExecutionNode): Promise<void> {
+    void _executionNode;
     return undefined;
   }
 

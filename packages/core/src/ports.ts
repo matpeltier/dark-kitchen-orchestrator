@@ -6,6 +6,7 @@ import type {
   Configuration,
   ConfigurationId,
   EventId,
+  ExecutionNode,
   ExecutionNodeId,
   Intervention,
   InterventionId,
@@ -156,6 +157,8 @@ export interface RuntimeStore {
   saveTask(task: Task): Promise<void>;
   getTaskGraph(taskGraphId: TaskGraphId): Promise<TaskGraph | undefined>;
   saveTaskGraph(taskGraph: TaskGraph): Promise<void>;
+  getExecutionNode(executionNodeId: ExecutionNodeId): Promise<ExecutionNode | undefined>;
+  saveExecutionNode(executionNode: ExecutionNode): Promise<void>;
   getRun(runId: RunId): Promise<Run | undefined>;
   saveRun(run: Run): Promise<void>;
   getWorkflowRun(workflowRunId: WorkflowRunId): Promise<WorkflowRun | undefined>;
