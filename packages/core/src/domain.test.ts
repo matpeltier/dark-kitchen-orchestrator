@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createAgentSessionId,
   createExecutionNodeId,
+  createInterventionId,
   createProjectId,
   createRepositoryId,
   createRunId,
@@ -18,6 +19,7 @@ import {
 import type {
   AgentSession,
   AgentSessionState,
+  Intervention,
   TaskDependency,
   TaskGraph,
   Workspace,
@@ -113,6 +115,40 @@ describe('domain validation', () => {
         [workspace('shared-workspace', taskA), { ...workspace('shared-workspace', taskB) }],
       ),
     ).toThrow('shared by multiple tasks');
+
+    expect(() =>
+      validatePrimaryWorktreeInvariant(
+        [taskA, taskB],
+        [
+          { ...workspace('workspace-a', taskA), path: '/worktrees/shared' },
+          { ...workspace('workspace-b', taskB), path: '/worktrees/shared' },
+        ],
+      ),
+    ).toThrow('path /worktrees/shared is shared by multiple tasks');
+  });
+});
+
+describe('intervention targets', () => {
+  it('ties each intervention scope to its target identifier type', () => {
+    const taskIntervention: Intervention = {
+      id: createInterventionId('intervention-1'),
+      scope: 'task',
+      targetId: taskA,
+      kind: 'approval',
+      status: 'open',
+      summary: 'Approve task execution',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    expect(taskIntervention.targetId).toBe(taskA);
+
+    // @ts-expect-error A task intervention must target a TaskId.
+    const invalidIntervention: Intervention = {
+      ...taskIntervention,
+      targetId: createAgentSessionId('agent-1'),
+    };
+    expect(invalidIntervention).toBeDefined();
   });
 });
 
@@ -131,5 +167,13 @@ describe('agent session state transitions', () => {
     expect(() => transitionAgentSession(agentSession('completed'), 'running', timestamp)).toThrow(
       'Illegal agent session state transition',
     );
+  });
+
+  it('keeps interrupted sessions resumable and nonterminal', () => {
+    const interrupted = transitionAgentSession(agentSession('running'), 'interrupted', timestamp);
+    const resumed = transitionAgentSession(interrupted, 'starting', timestamp);
+
+    expect(interrupted.completedAt).toBeUndefined();
+    expect(resumed.state).toBe('starting');
   });
 });

@@ -39,6 +39,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/core
 
+  packages/adapter-contract-fixture:
+    dependencies:
+      '@dark-kitchen/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/core: {}
 
 packages:

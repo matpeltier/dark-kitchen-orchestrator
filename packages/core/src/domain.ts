@@ -160,7 +160,12 @@ export interface PrimaryWorktreeAssignment {
   readonly workspaceId: WorkspaceId;
 }
 
-export type InterventionScope = 'task' | 'run' | 'agent';
+export type InterventionTarget =
+  | { readonly scope: 'task'; readonly targetId: TaskId }
+  | { readonly scope: 'run'; readonly targetId: RunId }
+  | { readonly scope: 'agent'; readonly targetId: AgentSessionId };
+export type InterventionScope = InterventionTarget['scope'];
+export type InterventionTargetId = InterventionTarget['targetId'];
 export type InterventionKind =
   | 'product-decision'
   | 'missing-access'
@@ -174,12 +179,8 @@ export type InterventionKind =
   | 'manual-intervention';
 export type InterventionStatus = 'open' | 'acknowledged' | 'resolved' | 'dismissed';
 
-export type InterventionTargetId = TaskId | RunId | AgentSessionId;
-
-export interface Intervention {
+export type Intervention = InterventionTarget & {
   readonly id: InterventionId;
-  readonly scope: InterventionScope;
-  readonly targetId: InterventionTargetId;
   readonly kind: InterventionKind;
   readonly status: InterventionStatus;
   readonly summary: string;
@@ -187,7 +188,7 @@ export interface Intervention {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly resolvedAt?: string;
-}
+};
 
 export interface Repository {
   readonly id: RepositoryId;
@@ -399,7 +400,7 @@ export function validatePrimaryWorktreeInvariant(
   }
 
   const primaryByTask = new Map<TaskId, WorkspaceId>();
-  const taskByWorkspace = new Map<WorkspaceId, TaskId>();
+  const taskByWorktreePath = new Map<string, TaskId>();
 
   for (const workspace of workspaces) {
     if (
@@ -416,15 +417,15 @@ export function validatePrimaryWorktreeInvariant(
       );
     }
 
-    const existingTask = taskByWorkspace.get(workspace.id);
+    const existingTask = taskByWorktreePath.get(workspace.path);
     if (existingTask !== undefined) {
       throw new DomainValidationError(
-        `Primary worktree ${workspace.id} is shared by multiple tasks.`,
+        `Primary worktree path ${workspace.path} is shared by multiple tasks.`,
       );
     }
 
     primaryByTask.set(workspace.taskId, workspace.id);
-    taskByWorkspace.set(workspace.id, workspace.taskId);
+    taskByWorktreePath.set(workspace.path, workspace.taskId);
   }
 
   for (const taskId of activeTasks) {

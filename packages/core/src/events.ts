@@ -68,7 +68,7 @@ export type AgentSessionCompletedEvent = TypedDomainEvent<
   'agent.completed',
   {
     readonly agentSessionId: AgentSessionId;
-    readonly state: Extract<AgentSessionState, 'completed' | 'failed' | 'stopped' | 'interrupted'>;
+    readonly state: Extract<AgentSessionState, 'completed' | 'failed' | 'stopped'>;
   }
 >;
 
