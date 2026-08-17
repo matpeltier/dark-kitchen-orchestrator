@@ -256,6 +256,47 @@ return { sequential, parallel: parallelResults }
     expect(new Set(runner.calls.map((call) => call.cacheKey)).size).toBe(4);
   });
 
+  it('shares nested invocation identities across name and script aliases', async () => {
+    const child = `${meta('canonical-child')}
+return agent('same', { role: 'child-worker' })
+`;
+    const resolveWorkflow = async () => ({ script: child, name: 'canonical-child' });
+    const journal = new InMemoryWorkflowJournal();
+    const script = `${meta('alias-parent')}
+const sequential = [
+  await workflow('child'),
+  await workflow({ scriptPath: './child.ts' }),
+]
+const parallelResults = await parallel([
+  () => workflow('child'),
+  () => workflow({ scriptPath: './child.ts' }),
+])
+return { sequential, parallel: parallelResults }
+`;
+    const runner = new ScriptedHarnessRunner((call) => call.workflowPath);
+    const first = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'alias-nested-run',
+      resolveWorkflow,
+    });
+    const second = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'alias-nested-run',
+      resolveWorkflow,
+    });
+
+    expect(first.result).toEqual({
+      sequential: ['alias-parent/canonical-child', 'alias-parent/canonical-child#2'],
+      parallel: ['alias-parent/canonical-child#3', 'alias-parent/canonical-child#4'],
+    });
+    expect(second.result).toEqual(first.result);
+    expect(second.cacheHits).toBe(4);
+    expect(runner.calls).toHaveLength(4);
+    expect(new Set(runner.calls.map((call) => call.cacheKey)).size).toBe(4);
+  });
+
   it('keeps delimiter-bearing nested workflow names distinct in the journal', async () => {
     const registry = new WorkflowRegistry();
     registry.register(`${meta('child')}
@@ -307,6 +348,18 @@ return agent('missing role')
     ).rejects.toBeInstanceOf(WorkflowInputError);
   });
 
+  it('rejects an unawaited agent call that omits its semantic role', async () => {
+    await expect(
+      runWorkflow(
+        `${meta('unawaited-missing-role')}
+agent('missing role')
+return { ok: true }
+`,
+        { runner: new ScriptedHarnessRunner(() => 'never') },
+      ),
+    ).rejects.toBeInstanceOf(WorkflowInputError);
+  });
+
   it('resolves workflow imports relative to cwd', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'dark-kitchen-workflow-import-'));
     try {
@@ -352,6 +405,18 @@ return agent(helper.prompt, { role: 'dynamic-imported-helper' })
     }
   });
 
+  it('executes dynamic imports in export default expressions', async () => {
+    const result = await runWorkflow(
+      `${meta('dynamic-export-default')}
+export default await import('node:path')
+return typeof __workflow_default_export.join
+`,
+      { runner: new ScriptedHarnessRunner(() => 'never') },
+    );
+
+    expect(result.result).toBe('function');
+  });
+
   it('resolves a nested workflow file and its imports relative to the workflow cwd', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'dark-kitchen-nested-workflow-import-'));
     try {
@@ -377,6 +442,32 @@ return agent(helper.prompt, { role: 'dynamic-imported-helper' })
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('cancels a nested workflow with a hanging resolver', async () => {
+    const controller = new AbortController();
+    let startedResolve: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    const resolveWorkflow = async () => {
+      startedResolve?.();
+      return new Promise<never>(() => {});
+    };
+    const pending = runWorkflow(
+      `${meta('hanging-resolver')}
+return workflow('child')
+`,
+      {
+        runner: new ScriptedHarnessRunner(() => 'never'),
+        resolveWorkflow,
+        signal: controller.signal,
+      },
+    );
+
+    await started;
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
   });
 
   it('normalizes optional null structured fields before validation', async () => {

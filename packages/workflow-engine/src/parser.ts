@@ -172,10 +172,8 @@ function transformStatement(
   }
   const rewritten = rewriteDynamicImports(script, sourceFile, statement);
   if (ts.isExportAssignment(statement)) {
-    const statementStart = statement.getStart(sourceFile);
-    const expressionStart = statement.expression.getStart(sourceFile) - statementStart;
-    const expressionEnd = statement.expression.end - statementStart;
-    return `const __workflow_default_export = ${rewritten.slice(expressionStart, expressionEnd)};`;
+    const expression = rewriteDynamicImports(script, sourceFile, statement.expression);
+    return `const __workflow_default_export = ${expression};`;
   }
   if (hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
     const text = rewritten.replace(/^export\s+/, '');
@@ -187,11 +185,7 @@ function transformStatement(
   return rewritten;
 }
 
-function rewriteDynamicImports(
-  script: string,
-  sourceFile: ts.SourceFile,
-  statement: ts.Statement,
-): string {
+function rewriteDynamicImports(script: string, sourceFile: ts.SourceFile, node: ts.Node): string {
   const replacements: Array<{ readonly start: number; readonly end: number }> = [];
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
@@ -202,17 +196,17 @@ function rewriteDynamicImports(
     }
     ts.forEachChild(node, visit);
   };
-  visit(statement);
-  if (replacements.length === 0) return script.slice(statement.getStart(sourceFile), statement.end);
+  visit(node);
+  if (replacements.length === 0) return script.slice(node.getStart(sourceFile), node.end);
 
   let result = '';
-  let cursor = statement.getStart(sourceFile);
+  let cursor = node.getStart(sourceFile);
   for (const replacement of replacements.sort((left, right) => left.start - right.start)) {
     result += script.slice(cursor, replacement.start);
     result += '__workflow_import';
     cursor = replacement.end;
   }
-  return result + script.slice(cursor, statement.end);
+  return result + script.slice(cursor, node.end);
 }
 
 function transformImport(statement: ts.ImportDeclaration, importIndex: number): string {

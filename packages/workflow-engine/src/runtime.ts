@@ -67,8 +67,8 @@ interface RuntimeContext {
     args: unknown,
     parentPath: string,
     depth: number,
-    invocation: number,
     basePath: string,
+    nestedInvocations: Map<string, number>,
   ): Promise<unknown>;
 }
 
@@ -328,30 +328,38 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     );
   };
 
-  context.runNested = (ref, args, parentPath, depth, invocation, basePath) => {
-    const promise = (async () => {
-      throwIfAborted(options.signal, signal);
-      const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
-      if (depth >= maxDepth)
-        throw new WorkflowInputError(`workflow() nesting exceeds the maximum depth of ${maxDepth}`);
-      if (!options.resolveWorkflow)
-        throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
-      const resolved = await options.resolveWorkflow(
-        resolveWorkflowRef(toWorkflowRef(ref), basePath),
-      );
-      const parsed = parseWorkflowScript(resolved.script);
-      const childName = resolved.name ?? parsed.meta.name;
-      return executeWorkflow(
-        parsed.body,
-        parsed.meta,
-        context,
-        args,
-        `${parentPath}/${encodeWorkflowPathComponent(childName)}${invocation === 1 ? '' : `#${invocation}`}`,
-        depth + 1,
-        resolved.basePath ?? context.options.cwd ?? process.cwd(),
-      );
-    })();
+  context.runNested = (ref, args, parentPath, depth, basePath, nestedInvocations) => {
+    const promise = abortable(
+      (async () => {
+        throwIfAborted(options.signal, signal);
+        const maxDepth = Math.max(0, Math.trunc(options.maxWorkflowDepth ?? 8));
+        if (depth >= maxDepth)
+          throw new WorkflowInputError(
+            `workflow() nesting exceeds the maximum depth of ${maxDepth}`,
+          );
+        if (!options.resolveWorkflow)
+          throw new WorkflowInputError('workflow() requires a resolveWorkflow function');
+        const resolved = await options.resolveWorkflow(
+          resolveWorkflowRef(toWorkflowRef(ref), basePath),
+        );
+        const parsed = parseWorkflowScript(resolved.script);
+        const childName = resolved.name ?? parsed.meta.name;
+        const invocation = (nestedInvocations.get(childName) ?? 0) + 1;
+        nestedInvocations.set(childName, invocation);
+        return executeWorkflow(
+          parsed.body,
+          parsed.meta,
+          context,
+          args,
+          `${parentPath}/${encodeWorkflowPathComponent(childName)}${invocation === 1 ? '' : `#${invocation}`}`,
+          depth + 1,
+          resolved.basePath ?? context.options.cwd ?? process.cwd(),
+        );
+      })(),
+      signal,
+    );
     context.inFlight.add(promise);
+    promise.catch(() => undefined);
     promise.finally(() => context.inFlight.delete(promise)).catch(() => undefined);
     return promise;
   };
@@ -382,10 +390,11 @@ async function executeWorkflow(
     appendLog(context.options, context.state, String(message));
   const agent = (prompt: unknown, options: unknown = {}): Promise<unknown> => {
     const raw = normalizeOptions(options);
+    const role = requireString(raw.role, 'agent role');
     const withPhase: ParsedAgentOptions =
       raw.phase === undefined && phases.current !== undefined
-        ? { ...raw, phase: phases.current }
-        : raw;
+        ? { ...raw, role, phase: phases.current }
+        : { ...raw, role };
     const promise = context.runAgent(prompt, withPhase, workflowPath, occurrences);
     context.inFlight.add(promise);
     promise.catch(() => undefined);
@@ -444,10 +453,14 @@ async function executeWorkflow(
   };
   const workflow = (ref: unknown, nestedArgs?: unknown): Promise<unknown> => {
     const normalizedRef = toWorkflowRef(ref);
-    const invocationKey = workflowRefKey(normalizedRef);
-    const invocation = (nestedInvocations.get(invocationKey) ?? 0) + 1;
-    nestedInvocations.set(invocationKey, invocation);
-    return context.runNested(normalizedRef, nestedArgs, workflowPath, depth, invocation, basePath);
+    return context.runNested(
+      normalizedRef,
+      nestedArgs,
+      workflowPath,
+      depth,
+      basePath,
+      nestedInvocations,
+    );
   };
   const budget: WorkflowBudget = Object.freeze({
     total: context.tokenBudget ?? null,
@@ -687,12 +700,6 @@ function resolveWorkflowRef(ref: WorkflowRef, basePath: string): WorkflowRef {
     return ref;
   }
   return { ...ref, scriptPath: path.resolve(basePath, ref.scriptPath) };
-}
-
-function workflowRefKey(ref: WorkflowRef): string {
-  if (typeof ref === 'string') return `name:${ref}`;
-  if (ref.name !== undefined) return `name:${ref.name}`;
-  return `script:${ref.scriptPath ?? ''}`;
 }
 
 function encodeWorkflowPathComponent(value: string): string {
