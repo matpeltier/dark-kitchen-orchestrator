@@ -348,6 +348,49 @@ return parallel([
     ]);
   });
 
+  it('replays nested child calls when parallel preparation arrival order changes', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('arrival-child')}
+return agent('child', { role: 'child-worker' })
+`);
+    const journal = new InMemoryWorkflowJournal();
+    const script = `${meta('arrival-parent')}
+return parallel([
+  async () => {
+    await new Promise((resolve) => setTimeout(resolve, args.firstDelay))
+    return workflow('arrival-child')
+  },
+  async () => {
+    await new Promise((resolve) => setTimeout(resolve, args.secondDelay))
+    return workflow('arrival-child')
+  },
+])
+`;
+    const runner = new ScriptedHarnessRunner((call) => call.workflowPath);
+    const first = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'arrival-order-run',
+      args: { firstDelay: 20, secondDelay: 0 },
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+    const second = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'arrival-order-run',
+      args: { firstDelay: 0, secondDelay: 20 },
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+
+    expect(first.result).toEqual([
+      'arrival-parent/arrival-child',
+      'arrival-parent/arrival-child#2',
+    ]);
+    expect(second.result).toEqual(first.result);
+    expect(second.cacheHits).toBe(2);
+    expect(runner.calls).toHaveLength(2);
+  });
+
   it('shares nested invocation identities across name and script aliases', async () => {
     const child = `${meta('canonical-child')}
 return agent('same', { role: 'child-worker' })
@@ -568,6 +611,21 @@ return workflow('child')
     const pending = runWorkflow(
       `${meta('local-hang')}
 return await new Promise(() => {})
+`,
+      { runner, signal: controller.signal },
+    );
+
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
+    expect(runner.calls).toHaveLength(0);
+  });
+
+  it('cancels a hanging pipeline stage without starting a runner', async () => {
+    const controller = new AbortController();
+    const runner = new ScriptedHarnessRunner(() => 'should not run');
+    const pending = runWorkflow(
+      `${meta('pipeline-hang')}
+return pipeline([1], async () => new Promise(() => {}))
 `,
       { runner, signal: controller.signal },
     );

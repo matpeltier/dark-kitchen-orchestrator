@@ -84,6 +84,7 @@ interface RuntimeContext {
     prompt: unknown,
     rawOptions: unknown,
     workflowPath: string,
+    workflowIdentityPath: string,
     occurrences: Map<string, number>,
     position: LogicalPosition,
   ): Promise<unknown>;
@@ -91,6 +92,7 @@ interface RuntimeContext {
     ref: unknown,
     args: unknown,
     parentPath: string,
+    parentIdentityPath: string,
     depth: number,
     basePath: string,
     nestedInvocations: NestedInvocationState,
@@ -116,6 +118,7 @@ export async function runWorkflow<T = unknown>(
         parsed.meta,
         context,
         options.args,
+        encodeWorkflowPathComponent(parsed.meta.name),
         encodeWorkflowPathComponent(parsed.meta.name),
         0,
         options.cwd ?? process.cwd(),
@@ -176,7 +179,14 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     },
   };
 
-  context.runAgent = async (prompt, rawOptions, workflowPath, occurrences, position) => {
+  context.runAgent = async (
+    prompt,
+    rawOptions,
+    workflowPath,
+    workflowIdentityPath,
+    occurrences,
+    position,
+  ) => {
     throwIfAborted(options.signal, signal);
     const taskPrompt = requireString(prompt, 'agent prompt');
     const parsedOptions = normalizeOptions(rawOptions);
@@ -203,12 +213,12 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     // Labels are presentation-only; logical position also defines replay identity for parallel calls.
     const keyOptions = { ...callOptions, label: undefined };
     const cacheKey = workflowAgentCacheKey({
-      workflowPath,
+      workflowPath: workflowIdentityPath,
       role,
       occurrence,
       prompt: taskPrompt,
       options: keyOptions,
-      ...(position.segments.length === 1 ? {} : { identity: logicalPositionKey(position) }),
+      identity: logicalPositionKey(position),
     });
     const call: WorkflowAgentCall = {
       prompt: taskPrompt,
@@ -366,6 +376,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     ref,
     args,
     parentPath,
+    parentIdentityPath,
     depth,
     basePath,
     nestedInvocations,
@@ -397,11 +408,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
           // assigning this call's suffix.
           await Promise.all(
             nestedInvocations.entries
-              .filter(
-                (entry) =>
-                  sameLogicalScope(entry.position, invocation.position) &&
-                  compareLogicalPositions(entry.position, invocation.position) < 0,
-              )
+              .filter((entry) => compareLogicalPositions(entry.position, invocation.position) < 0)
               .map((entry) => entry.ready),
           );
           await Promise.all(predecessors);
@@ -420,6 +427,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
             context,
             args,
             `${parentPath}/${encodeWorkflowPathComponent(childName)}${occurrence === 1 ? '' : `#${occurrence}`}`,
+            `${parentIdentityPath}/${encodeWorkflowPathComponent(childName)}@${logicalPositionKey(position)}`,
             depth + 1,
             resolved.basePath ?? context.options.cwd ?? process.cwd(),
           );
@@ -443,6 +451,7 @@ async function executeWorkflow(
   context: RuntimeContext,
   args: unknown,
   workflowPath: string,
+  workflowIdentityPath: string,
   depth: number,
   basePath: string,
 ): Promise<unknown> {
@@ -468,7 +477,14 @@ async function executeWorkflow(
         : { ...raw, role };
     const logicalContext = requireLogicalExecutionContext();
     const position = allocateLogicalPosition(logicalContext);
-    const promise = context.runAgent(prompt, withPhase, workflowPath, occurrences, position);
+    const promise = context.runAgent(
+      prompt,
+      withPhase,
+      workflowPath,
+      workflowIdentityPath,
+      occurrences,
+      position,
+    );
     context.inFlight.add(promise);
     promise.catch(() => undefined);
     promise.finally(() => context.inFlight.delete(promise)).catch(() => undefined);
@@ -572,6 +588,7 @@ async function executeWorkflow(
       normalizedRef,
       nestedArgs,
       workflowPath,
+      workflowIdentityPath,
       depth,
       basePath,
       nestedInvocations,
@@ -861,14 +878,6 @@ function allocateLogicalPosition(context: LogicalExecutionContext): LogicalPosit
   const position = { segments: [...context.path, context.nextPosition] };
   context.nextPosition += 1;
   return position;
-}
-
-function sameLogicalScope(first: LogicalPosition, second: LogicalPosition): boolean {
-  if (first.segments.length !== second.segments.length) return false;
-  for (let index = 0; index < first.segments.length - 1; index += 1) {
-    if (first.segments[index] !== second.segments[index]) return false;
-  }
-  return true;
 }
 
 function compareLogicalPositions(first: LogicalPosition, second: LogicalPosition): number {
