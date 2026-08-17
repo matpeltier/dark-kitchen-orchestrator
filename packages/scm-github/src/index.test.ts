@@ -1,3 +1,8 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { createRepositoryId, createTaskId } from '@dark-kitchen/core';
@@ -28,6 +33,7 @@ class GitHubApiFixture implements GitHubApiClient {
   public checkStatus = 'completed';
   public headSha = 'head-sha';
   public changeHeadWhenChecksAreRead = false;
+  public remoteUrl = 'https://github.com/acme/kitchen.git';
 
   public async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     this.requests.push({
@@ -42,7 +48,7 @@ class GitHubApiFixture implements GitHubApiClient {
         name: 'kitchen',
         default_branch: 'main',
         html_url: 'https://github.com/acme/kitchen',
-        clone_url: 'https://github.com/acme/kitchen.git',
+        clone_url: this.remoteUrl,
       } as T;
     }
     if (path.includes('/git/ref/heads/feature%2Ftask-1')) {
@@ -107,8 +113,17 @@ describe('GitHub SCM adapter', () => {
   it('pushes a branch, creates a task-linked PR, waits for checks, and verifies a merge', async () => {
     const api = new GitHubApiFixture();
     const events: string[] = [];
+    const gitPushes: {
+      readonly remoteUrl: string;
+      readonly branch: string;
+      readonly commitSha: string;
+      readonly force: boolean;
+    }[] = [];
     const adapter = new GitHubScmAdapter({
       api,
+      gitPush: async (input) => {
+        gitPushes.push(input);
+      },
       requiredChecks: ['CI'],
       mergeStrategy: 'squash',
       eventPublisher: {
@@ -128,6 +143,14 @@ describe('GitHub SCM adapter', () => {
       commitSha: 'head-sha',
     });
     expect(branch.commitSha).toBe('head-sha');
+    expect(gitPushes).toEqual([
+      {
+        remoteUrl: 'https://github.com/acme/kitchen.git',
+        branch: 'feature/task-1',
+        commitSha: 'head-sha',
+        force: false,
+      },
+    ]);
 
     const pullRequest = await adapter.createPullRequest({
       repositoryId: repository.id,
@@ -159,6 +182,28 @@ describe('GitHub SCM adapter', () => {
     expect(mergeRequest?.path).toBe('/repos/acme/kitchen/pulls/1/merge');
     expect(mergeRequest?.body).toContain('"merge_method":"squash"');
     expect(mergeRequest?.body).toContain('"sha":"head-sha"');
+  });
+
+  it('does not report an unknown local commit as pushed', async () => {
+    const api = new GitHubApiFixture();
+    const remotePath = mkdtempSync(join(tmpdir(), 'scm-github-remote-'));
+    execFileSync('git', ['init', '--bare', remotePath], { stdio: 'ignore' });
+    api.remoteUrl = remotePath;
+    try {
+      const adapter = new GitHubScmAdapter({ api });
+      const repository = await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+
+      await expect(
+        adapter.pushBranch({
+          repositoryId: repository.id,
+          branch: 'feature/task-1',
+          commitSha: 'unknown-sha',
+        }),
+      ).rejects.toThrow('unknown-sha');
+      expect(api.requests.some((request) => request.path.endsWith('/git/refs'))).toBe(false);
+    } finally {
+      rmSync(remotePath, { recursive: true, force: true });
+    }
   });
 
   it('refuses to merge when a required check fails', async () => {
@@ -234,5 +279,25 @@ describe('GitHub SCM adapter', () => {
     expect(content.title).toBe('[Dark Kitchen] Ship the adapter (LIN-42)');
     expect(content.body).toContain('[LIN-42](https://linear.app/acme/issue/LIN-42)');
     expect(content.body).not.toContain('Closes #');
+  });
+
+  it('qualifies a cross-repository GitHub tracker issue in close syntax', () => {
+    const content = buildGitHubPullRequestContent({
+      repositoryId,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      task: {
+        taskId: createTaskId('other-repo-42'),
+        title: 'Link the external issue',
+        trackerReference: {
+          provider: 'github',
+          id: 'other/repo#42',
+          url: 'https://github.com/other/repo/issues/42',
+        },
+      },
+    });
+
+    expect(content.body).toContain('Closes other/repo#42');
+    expect(content.body).not.toContain('Closes #42');
   });
 });

@@ -1,3 +1,6 @@
+import { execFile as execFileCallback } from 'node:child_process';
+import { promisify } from 'node:util';
+
 import {
   createCheckId,
   createEventId,
@@ -48,6 +51,14 @@ export interface GitHubScmAdapterOptions {
   readonly pollIntervalMs?: number;
   readonly now?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly gitPush?: (input: GitHubGitPushInput) => Promise<void>;
+}
+
+export interface GitHubGitPushInput {
+  readonly remoteUrl: string;
+  readonly branch: string;
+  readonly commitSha: string;
+  readonly force: boolean;
 }
 
 interface GitHubRepositoryResponse {
@@ -57,11 +68,6 @@ interface GitHubRepositoryResponse {
   readonly html_url?: string;
   readonly clone_url?: string;
   readonly ssh_url?: string;
-}
-
-interface GitHubReferenceResponse {
-  readonly ref?: string;
-  readonly object?: { readonly sha?: string };
 }
 
 interface GitHubPullRequestResponse {
@@ -215,7 +221,7 @@ export class GitHubHttpClient implements GitHubApiClient {
 /**
  * Deterministic task content shared by the adapter and its tests. A tracker
  * reference is linked as data; GitHub close syntax is emitted only for a
- * GitHub Issues tracker with a resolvable issue number.
+ * GitHub Issues tracker with a resolvable issue number and repository.
  */
 export function buildGitHubPullRequestContent(input: CreatePullRequestInput): {
   readonly title: string;
@@ -240,9 +246,9 @@ export function buildGitHubPullRequestContent(input: CreatePullRequestInput): {
   ];
 
   if (tracker?.provider.toLowerCase() === 'github') {
-    const issueNumber = githubIssueNumber(tracker);
-    if (issueNumber !== undefined) {
-      lines.push(`Closes #${issueNumber}`);
+    const issue = githubIssueReference(tracker);
+    if (issue?.repository !== undefined) {
+      lines.push(`Closes ${issue.repository}#${issue.number}`);
     }
   }
   if (task.description?.trim()) {
@@ -266,6 +272,7 @@ export class GitHubScmAdapter implements ScmAdapter {
   private readonly eventPublisher: EventPublisher | undefined;
   private readonly now: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly gitPush: (input: GitHubGitPushInput) => Promise<void>;
   private eventSequence = 0;
 
   public constructor(options: GitHubScmAdapterOptions = {}) {
@@ -275,6 +282,12 @@ export class GitHubScmAdapter implements ScmAdapter {
     this.sleep =
       options.sleep ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.gitPush =
+      options.gitPush ??
+      ((input) =>
+        pushGitBranch(input, {
+          token: options.token,
+        }));
 
     const configuredPolicy = options.mergePolicy ?? {};
     this.mergePolicy = {
@@ -328,30 +341,13 @@ export class GitHubScmAdapter implements ScmAdapter {
   public async pushBranch(input: PushBranchInput): Promise<Branch> {
     const repository = await this.getCachedRepository(input.repositoryId);
     const branch = normalizeBranchName(input.branch);
-    const branchPath = `/repos/${repositoryPath(repository.reference.id)}/git/ref/heads/${encodeURIComponent(branch)}`;
-    let exists = true;
-    try {
-      await this.api.request<GitHubReferenceResponse>(branchPath);
-    } catch (error) {
-      if (!isGitHubStatus(error, 404)) {
-        throw error;
-      }
-      exists = false;
-    }
-
-    const response = exists
-      ? await this.api.request<GitHubReferenceResponse>(branchPath, {
-          method: 'PATCH',
-          body: JSON.stringify({ sha: input.commitSha, force: input.force ?? false }),
-        })
-      : await this.api.request<GitHubReferenceResponse>(
-          `/repos/${repositoryPath(repository.reference.id)}/git/refs`,
-          {
-            method: 'POST',
-            body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: input.commitSha }),
-          },
-        );
-    const commitSha = response.object?.sha ?? input.commitSha;
+    await this.gitPush({
+      remoteUrl: requireText(repository.remoteUrl, 'GitHub repository remote URL'),
+      branch,
+      commitSha: input.commitSha,
+      force: input.force ?? false,
+    });
+    const commitSha = input.commitSha;
     const pushedBranch: Branch = { repositoryId: repository.id, name: branch, commitSha };
     await this.publish({
       id: this.nextEventId('branch-pushed'),
@@ -725,15 +721,42 @@ function normalizeBranchName(value: string): string {
   return branch;
 }
 
-function githubIssueNumber(reference: {
+function githubIssueReference(reference: {
   readonly id: string;
   readonly url?: string;
-}): string | undefined {
-  const fromId = reference.id.match(/(?:^|#)(\d+)$/)?.[1];
-  if (fromId !== undefined) {
-    return fromId;
+}): { readonly repository?: string; readonly number: string } | undefined {
+  const fromUrl =
+    reference.url === undefined
+      ? null
+      : reference.url.match(/github\.com\/([^/]+\/[^/#?]+)\/issues\/(\d+)(?:$|[/?#])/i);
+  if (fromUrl !== null && fromUrl[1] !== undefined && fromUrl[2] !== undefined) {
+    return { repository: fromUrl[1], number: fromUrl[2] };
   }
-  return reference.url?.match(/\/issues\/(\d+)(?:$|[/?#])/)?.[1];
+  const fromId = reference.id.match(/^(?:github:)?([^/\s#]+\/[^/\s#]+)#(\d+)$/i);
+  if (fromId !== null && fromId[1] !== undefined && fromId[2] !== undefined) {
+    return { repository: fromId[1], number: fromId[2] };
+  }
+  const issueNumber = reference.id.match(/(?:^|#)(\d+)$/)?.[1];
+  return issueNumber === undefined ? undefined : { number: issueNumber };
+}
+
+const execFile = promisify(execFileCallback);
+
+async function pushGitBranch(
+  input: GitHubGitPushInput,
+  options: { readonly token: string | undefined },
+): Promise<void> {
+  const refspec = `${input.force ? '+' : ''}${input.commitSha}:refs/heads/${input.branch}`;
+  const env =
+    options.token === undefined
+      ? undefined
+      : {
+          ...process.env,
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'http.extraheader',
+          GIT_CONFIG_VALUE_0: `AUTHORIZATION: bearer ${options.token}`,
+        };
+  await execFile('git', ['push', input.remoteUrl, refspec], { env });
 }
 
 function mergeChecks(
@@ -814,8 +837,8 @@ function isGitHubStatus(error: unknown, status: number): error is GitHubApiError
   return error instanceof GitHubApiError && error.status === status;
 }
 
-function requireText(value: string, label: string): string {
-  if (value.trim().length === 0) {
+function requireText(value: string | undefined, label: string): string {
+  if (value === undefined || value.trim().length === 0) {
     throw new ScmMergeError(`${label} must not be empty.`);
   }
   return value;
