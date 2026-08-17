@@ -59,6 +59,7 @@ export function workflowAgentCacheKey(input: {
   readonly occurrence: number;
   readonly prompt: string;
   readonly options: unknown;
+  readonly identity?: string;
 }): string {
   return createHash('sha256').update(stableStringify(input)).digest('hex');
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
@@ -43,15 +44,26 @@ interface RuntimeState {
   spent: number;
 }
 
+interface LogicalPosition {
+  readonly segments: readonly number[];
+}
+
+interface LogicalExecutionContext {
+  readonly path: readonly number[];
+  nextPosition: number;
+  readonly predecessors: readonly Promise<void>[];
+}
+
+const logicalExecution = new AsyncLocalStorage<LogicalExecutionContext>();
+
 interface NestedInvocation {
-  readonly sequence: number;
+  readonly position: LogicalPosition;
   readonly ready: Promise<void>;
   readonly markReady: () => void;
   childName?: string;
 }
 
 interface NestedInvocationState {
-  nextSequence: number;
   readonly entries: NestedInvocation[];
 }
 
@@ -73,6 +85,7 @@ interface RuntimeContext {
     rawOptions: unknown,
     workflowPath: string,
     occurrences: Map<string, number>,
+    position: LogicalPosition,
   ): Promise<unknown>;
   runNested(
     ref: unknown,
@@ -81,6 +94,8 @@ interface RuntimeContext {
     depth: number,
     basePath: string,
     nestedInvocations: NestedInvocationState,
+    position: LogicalPosition,
+    predecessors: readonly Promise<void>[],
   ): Promise<unknown>;
 }
 
@@ -95,14 +110,17 @@ export async function runWorkflow<T = unknown>(
 
   try {
     throwIfAborted(options.signal, context.signal);
-    const result = await executeWorkflow(
-      parsed.body,
-      parsed.meta,
-      context,
-      options.args,
-      encodeWorkflowPathComponent(parsed.meta.name),
-      0,
-      options.cwd ?? process.cwd(),
+    const result = await abortable(
+      executeWorkflow(
+        parsed.body,
+        parsed.meta,
+        context,
+        options.args,
+        encodeWorkflowPathComponent(parsed.meta.name),
+        0,
+        options.cwd ?? process.cwd(),
+      ),
+      context.signal,
     );
     assertSerializable(result);
     return {
@@ -158,14 +176,17 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     },
   };
 
-  context.runAgent = async (prompt, rawOptions, workflowPath, occurrences) => {
+  context.runAgent = async (prompt, rawOptions, workflowPath, occurrences, position) => {
     throwIfAborted(options.signal, signal);
     const taskPrompt = requireString(prompt, 'agent prompt');
     const parsedOptions = normalizeOptions(rawOptions);
     const role = requireString(parsedOptions.role, 'agent role');
     const roleKey = `${workflowPath}\u0000${role}`;
-    const occurrence = (occurrences.get(roleKey) ?? 0) + 1;
-    occurrences.set(roleKey, occurrence);
+    const occurrence =
+      position.segments.length === 1
+        ? (occurrences.get(roleKey) ?? 0) + 1
+        : stablePositionNumber(position);
+    if (position.segments.length === 1) occurrences.set(roleKey, occurrence);
     if (state.agentCount >= context.maxAgents) throw new WorkflowAgentCapError();
     if (
       context.tokenBudget !== null &&
@@ -179,7 +200,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     const index = ++state.nextAgentIndex;
     const label = parsedOptions.label?.trim() || role;
     const callOptions: AgentOptions = { ...parsedOptions, role };
-    // Labels are presentation-only; semantic role, prompt, occurrence, and work options define replay identity.
+    // Labels are presentation-only; logical position also defines replay identity for parallel calls.
     const keyOptions = { ...callOptions, label: undefined };
     const cacheKey = workflowAgentCacheKey({
       workflowPath,
@@ -187,6 +208,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
       occurrence,
       prompt: taskPrompt,
       options: keyOptions,
+      ...(position.segments.length === 1 ? {} : { identity: logicalPositionKey(position) }),
     });
     const call: WorkflowAgentCall = {
       prompt: taskPrompt,
@@ -340,8 +362,17 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     );
   };
 
-  context.runNested = (ref, args, parentPath, depth, basePath, nestedInvocations) => {
-    const invocation = reserveNestedInvocation(nestedInvocations);
+  context.runNested = (
+    ref,
+    args,
+    parentPath,
+    depth,
+    basePath,
+    nestedInvocations,
+    position,
+    predecessors,
+  ) => {
+    const invocation = reserveNestedInvocation(nestedInvocations, position);
     const promise = abortable(
       (async () => {
         try {
@@ -356,21 +387,32 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
           const resolved = await options.resolveWorkflow(
             resolveWorkflowRef(toWorkflowRef(ref), basePath),
           );
+          throwIfAborted(options.signal, signal);
           const parsed = parseWorkflowScript(resolved.script);
           const childName = resolved.name ?? parsed.meta.name;
           invocation.childName = childName;
 
-          // Resolution may complete out of order. Wait for earlier calls to
-          // publish their canonical names before assigning this call's suffix.
+          // A logical branch owns its position even when its async work arrives later.
+          // Wait for all logically earlier calls to publish their canonical names before
+          // assigning this call's suffix.
           await Promise.all(
             nestedInvocations.entries
-              .filter((entry) => entry.sequence < invocation.sequence)
+              .filter(
+                (entry) =>
+                  sameLogicalScope(entry.position, invocation.position) &&
+                  compareLogicalPositions(entry.position, invocation.position) < 0,
+              )
               .map((entry) => entry.ready),
           );
+          await Promise.all(predecessors);
+          throwIfAborted(options.signal, signal);
           const occurrence = nestedInvocations.entries.filter(
-            (entry) => entry.sequence <= invocation.sequence && entry.childName === childName,
+            (entry) =>
+              entry.childName === childName &&
+              compareLogicalPositions(entry.position, invocation.position) <= 0,
           ).length;
           invocation.markReady();
+          throwIfAborted(options.signal, signal);
 
           return executeWorkflow(
             parsed.body,
@@ -405,7 +447,7 @@ async function executeWorkflow(
   basePath: string,
 ): Promise<unknown> {
   const occurrences = new Map<string, number>();
-  const nestedInvocations: NestedInvocationState = { nextSequence: 0, entries: [] };
+  const nestedInvocations: NestedInvocationState = { entries: [] };
   const phases = {
     current: undefined as string | undefined,
     phase(title: unknown): void {
@@ -424,7 +466,9 @@ async function executeWorkflow(
       raw.phase === undefined && phases.current !== undefined
         ? { ...raw, role, phase: phases.current }
         : { ...raw, role };
-    const promise = context.runAgent(prompt, withPhase, workflowPath, occurrences);
+    const logicalContext = requireLogicalExecutionContext();
+    const position = allocateLogicalPosition(logicalContext);
+    const promise = context.runAgent(prompt, withPhase, workflowPath, occurrences, position);
     context.inFlight.add(promise);
     promise.catch(() => undefined);
     promise.finally(() => context.inFlight.delete(promise)).catch(() => undefined);
@@ -440,15 +484,34 @@ async function executeWorkflow(
         `parallel() expects an array of functions (maximum ${MAX_ITEMS_PER_CALL})`,
       );
     }
+    const logicalContext = requireLogicalExecutionContext();
+    const parallelPosition = allocateLogicalPosition(logicalContext);
+    const earlierEntries = nestedInvocations.entries
+      .filter((entry) => compareLogicalPositions(entry.position, parallelPosition) < 0)
+      .map((entry) => entry.ready);
+    const branches = thunks.map(() => deferred());
     return Promise.all(
-      thunks.map(async (thunk) => {
-        try {
-          return await (thunk as () => unknown)();
-        } catch (error) {
-          if (isFatal(error)) throw error;
-          log(`parallel item failed: ${errorMessage(error)}`);
-          return null;
-        }
+      thunks.map((thunk, index) => {
+        const branchContext: LogicalExecutionContext = {
+          path: [...parallelPosition.segments, index],
+          nextPosition: 0,
+          predecessors: [
+            ...logicalContext.predecessors,
+            ...earlierEntries,
+            ...branches.slice(0, index).map((branch) => branch.promise),
+          ],
+        };
+        return logicalExecution.run(branchContext, async () => {
+          try {
+            return await (thunk as () => unknown)();
+          } catch (error) {
+            if (isFatal(error)) throw error;
+            log(`parallel item failed: ${errorMessage(error)}`);
+            return null;
+          } finally {
+            branches[index]?.resolve();
+          }
+        });
       }),
     );
   };
@@ -462,26 +525,49 @@ async function executeWorkflow(
         `pipeline() expects an array and function stages (maximum ${MAX_ITEMS_PER_CALL} items)`,
       );
     }
+    const logicalContext = requireLogicalExecutionContext();
+    const pipelinePosition = allocateLogicalPosition(logicalContext);
+    const earlierEntries = nestedInvocations.entries
+      .filter((entry) => compareLogicalPositions(entry.position, pipelinePosition) < 0)
+      .map((entry) => entry.ready);
+    const branches = items.map(() => deferred());
     return Promise.all(
-      items.map(async (item, index) => {
-        let value: unknown = item;
-        for (const stage of stages) {
+      items.map((item, index) => {
+        const branchContext: LogicalExecutionContext = {
+          path: [...pipelinePosition.segments, index],
+          nextPosition: 0,
+          predecessors: [
+            ...logicalContext.predecessors,
+            ...earlierEntries,
+            ...branches.slice(0, index).map((branch) => branch.promise),
+          ],
+        };
+        return logicalExecution.run(branchContext, async () => {
           try {
-            value = await (
-              stage as (previous: unknown, original: unknown, itemIndex: number) => unknown
-            )(value, item, index);
-          } catch (error) {
-            if (isFatal(error)) throw error;
-            log(`pipeline item ${index} failed: ${errorMessage(error)}`);
-            return null;
+            let value: unknown = item;
+            for (const stage of stages) {
+              try {
+                value = await (
+                  stage as (previous: unknown, original: unknown, itemIndex: number) => unknown
+                )(value, item, index);
+              } catch (error) {
+                if (isFatal(error)) throw error;
+                log(`pipeline item ${index} failed: ${errorMessage(error)}`);
+                return null;
+              }
+            }
+            return value;
+          } finally {
+            branches[index]?.resolve();
           }
-        }
-        return value;
+        });
       }),
     );
   };
   const workflow = (ref: unknown, nestedArgs?: unknown): Promise<unknown> => {
     const normalizedRef = toWorkflowRef(ref);
+    const logicalContext = requireLogicalExecutionContext();
+    const position = allocateLogicalPosition(logicalContext);
     return context.runNested(
       normalizedRef,
       nestedArgs,
@@ -489,6 +575,8 @@ async function executeWorkflow(
       depth,
       basePath,
       nestedInvocations,
+      position,
+      logicalContext.predecessors,
     );
   };
   const budget: WorkflowBudget = Object.freeze({
@@ -524,17 +612,20 @@ async function executeWorkflow(
     '__workflow_import',
     transpiled,
   );
-  return execute(
-    agent,
-    parallel,
-    pipeline,
-    workflow,
-    phases.phase.bind(phases),
-    log,
-    args,
-    budget,
-    basePath,
-    (specifier: string) => import(resolveWorkflowImport(specifier, basePath)),
+  const logicalContext = createLogicalExecutionContext();
+  return logicalExecution.run(logicalContext, () =>
+    execute(
+      agent,
+      parallel,
+      pipeline,
+      workflow,
+      phases.phase.bind(phases),
+      log,
+      args,
+      budget,
+      basePath,
+      (specifier: string) => import(resolveWorkflowImport(specifier, basePath)),
+    ),
   );
 }
 
@@ -731,14 +822,17 @@ function resolveWorkflowRef(ref: WorkflowRef, basePath: string): WorkflowRef {
   return { ...ref, scriptPath: path.resolve(basePath, ref.scriptPath) };
 }
 
-function reserveNestedInvocation(state: NestedInvocationState): NestedInvocation {
+function reserveNestedInvocation(
+  state: NestedInvocationState,
+  position: LogicalPosition,
+): NestedInvocation {
   let resolveReady: () => void = () => undefined;
   const ready = new Promise<void>((resolve) => {
     resolveReady = resolve;
   });
   let markedReady = false;
   const invocation: NestedInvocation = {
-    sequence: state.nextSequence++,
+    position,
     ready,
     markReady: () => {
       if (markedReady) return;
@@ -748,6 +842,63 @@ function reserveNestedInvocation(state: NestedInvocationState): NestedInvocation
   };
   state.entries.push(invocation);
   return invocation;
+}
+
+function createLogicalExecutionContext(
+  pathSegments: readonly number[] = [],
+  predecessors: readonly Promise<void>[] = [],
+): LogicalExecutionContext {
+  return { path: pathSegments, nextPosition: 0, predecessors };
+}
+
+function requireLogicalExecutionContext(): LogicalExecutionContext {
+  const context = logicalExecution.getStore();
+  if (!context) throw new WorkflowInputError('workflow execution context is unavailable');
+  return context;
+}
+
+function allocateLogicalPosition(context: LogicalExecutionContext): LogicalPosition {
+  const position = { segments: [...context.path, context.nextPosition] };
+  context.nextPosition += 1;
+  return position;
+}
+
+function sameLogicalScope(first: LogicalPosition, second: LogicalPosition): boolean {
+  if (first.segments.length !== second.segments.length) return false;
+  for (let index = 0; index < first.segments.length - 1; index += 1) {
+    if (first.segments[index] !== second.segments[index]) return false;
+  }
+  return true;
+}
+
+function compareLogicalPositions(first: LogicalPosition, second: LogicalPosition): number {
+  const length = Math.min(first.segments.length, second.segments.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = first.segments[index]! - second.segments[index]!;
+    if (difference !== 0) return difference;
+  }
+  return first.segments.length - second.segments.length;
+}
+
+function logicalPositionKey(position: LogicalPosition): string {
+  return position.segments.join('.');
+}
+
+function stablePositionNumber(position: LogicalPosition): number {
+  let hash = 2166136261;
+  for (const segment of position.segments) {
+    hash ^= segment;
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0 || 1;
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolvePromise: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
 }
 
 function encodeWorkflowPathComponent(value: string): string {

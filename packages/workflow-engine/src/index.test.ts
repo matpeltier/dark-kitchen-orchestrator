@@ -296,6 +296,58 @@ return parallel([
     expect(runner.calls).toHaveLength(2);
   });
 
+  it('replays nested identities after asynchronous parallel preparation', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('prepared-child')}
+return agent('child', { role: 'child-worker' })
+`);
+    const journal = new InMemoryWorkflowJournal();
+    const script = `${meta('prepared-parent')}
+return parallel([
+  async () => {
+    await agent('slow preparation', { role: 'preparer' })
+    return workflow('prepared-child')
+  },
+  async () => {
+    await agent('fast preparation', { role: 'preparer' })
+    return workflow('prepared-child')
+  },
+])
+`;
+    const runner = new ScriptedHarnessRunner(async (call) => {
+      if (call.role === 'preparer') {
+        await new Promise((resolve) =>
+          setTimeout(resolve, call.prompt.startsWith('slow') ? 15 : 0),
+        );
+      }
+      return call.workflowPath;
+    });
+    const first = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'prepared-nested-run',
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+    const second = await runWorkflow(script, {
+      runner,
+      journal,
+      runId: 'prepared-nested-run',
+      resolveWorkflow: registry.resolve.bind(registry),
+    });
+
+    expect(first.result).toEqual([
+      'prepared-parent/prepared-child',
+      'prepared-parent/prepared-child#2',
+    ]);
+    expect(second.result).toEqual(first.result);
+    expect(second.cacheHits).toBe(4);
+    expect(runner.calls).toHaveLength(4);
+    expect(runner.calls.slice(2).map((call) => call.workflowPath)).toEqual([
+      'prepared-parent/prepared-child',
+      'prepared-parent/prepared-child#2',
+    ]);
+  });
+
   it('shares nested invocation identities across name and script aliases', async () => {
     const child = `${meta('canonical-child')}
 return agent('same', { role: 'child-worker' })
@@ -508,6 +560,60 @@ return workflow('child')
     await started;
     controller.abort();
     await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
+  });
+
+  it('cancels workflow code waiting on a local promise without starting a runner', async () => {
+    const controller = new AbortController();
+    const runner = new ScriptedHarnessRunner(() => 'should not run');
+    const pending = runWorkflow(
+      `${meta('local-hang')}
+return await new Promise(() => {})
+`,
+      { runner, signal: controller.signal },
+    );
+
+    controller.abort();
+    await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
+    expect(runner.calls).toHaveLength(0);
+  });
+
+  it('does not start a nested workflow after cancellation releases its resolver', async () => {
+    const controller = new AbortController();
+    let releaseResolver: (() => void) | undefined;
+    let resolverStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      resolverStarted = resolve;
+    });
+    const resolveWorkflow = async () => {
+      resolverStarted?.();
+      await new Promise<void>((resolve) => {
+        releaseResolver = resolve;
+      });
+      return {
+        script: `${meta('released-child')}
+return agent('child side effect', { role: 'child-worker' })
+`,
+        name: 'released-child',
+      };
+    };
+    let childStarted = false;
+    const runner = new ScriptedHarnessRunner(() => {
+      childStarted = true;
+      return 'should not run';
+    });
+    const pending = runWorkflow(
+      `${meta('released-parent')}
+return workflow('released-child')
+`,
+      { runner, resolveWorkflow, signal: controller.signal },
+    );
+
+    await started;
+    controller.abort();
+    releaseResolver?.();
+    await expect(pending).rejects.toBeInstanceOf(WorkflowAbortError);
+    await Promise.resolve();
+    expect(childStarted).toBe(false);
   });
 
   it('normalizes optional null structured fields before validation', async () => {
