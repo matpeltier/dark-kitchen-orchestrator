@@ -248,7 +248,7 @@ return { sequential, parallel: parallelResults }
 
     expect(first.result).toEqual({
       sequential: ['repeated-parent/repeated-child', 'repeated-parent/repeated-child#2'],
-      parallel: ['repeated-parent/repeated-child#3', 'repeated-parent/repeated-child#4'],
+      parallel: ['repeated-parent/repeated-child@2.0.0', 'repeated-parent/repeated-child@2.1.0'],
     });
     expect(second.result).toEqual(first.result);
     expect(second.cacheHits).toBe(4);
@@ -288,12 +288,112 @@ return parallel([
     });
 
     expect(first.result).toEqual([
-      'ordered-parent/canonical-child',
-      'ordered-parent/canonical-child#2',
+      'ordered-parent/canonical-child@0.0.0',
+      'ordered-parent/canonical-child@0.1.0',
     ]);
     expect(second.result).toEqual(first.result);
     expect(second.cacheHits).toBe(2);
     expect(runner.calls).toHaveLength(2);
+  });
+
+  it('runs child workflows concurrently in parallel branches', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('concurrent-child')}
+return agent(args.prompt, { role: 'child-worker' })
+`);
+    let active = 0;
+    let maximum = 0;
+    const runner = new ScriptedHarnessRunner(async (call) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return call.prompt;
+    });
+    const result = await runWorkflow(
+      `${meta('concurrent-parent')}
+return parallel([
+  () => workflow('concurrent-child', { prompt: 'first' }),
+  () => workflow('concurrent-child', { prompt: 'second' }),
+])
+`,
+      {
+        runner,
+        concurrency: 2,
+        resolveWorkflow: registry.resolve.bind(registry),
+      },
+    );
+
+    expect(result.result).toEqual(['first', 'second']);
+    expect(maximum).toBe(2);
+  });
+
+  it('runs child workflows concurrently across pipeline items', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('pipeline-child')}
+return agent(args.prompt, { role: 'pipeline-child-worker' })
+`);
+    let active = 0;
+    let maximum = 0;
+    const runner = new ScriptedHarnessRunner(async (call) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return call.prompt;
+    });
+    const result = await runWorkflow(
+      `${meta('pipeline-parent')}
+return pipeline(['first', 'second'], (prompt) => workflow('pipeline-child', { prompt }))
+`,
+      {
+        runner,
+        concurrency: 2,
+        resolveWorkflow: registry.resolve.bind(registry),
+      },
+    );
+
+    expect(result.result).toEqual(['first', 'second']);
+    expect(maximum).toBe(2);
+  });
+
+  it('does not deadlock a child behind an earlier branch waiting for its side effect', async () => {
+    const registry = new WorkflowRegistry();
+    registry.register(`${meta('gate-child')}
+log('child ran')
+return 'child result'
+`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1_000);
+    try {
+      const result = await runWorkflow(
+        `${meta('gate-parent')}
+let releaseGate
+const gate = new Promise((resolve) => { releaseGate = resolve })
+return parallel([
+  async () => {
+    await gate
+    return 'gate released'
+  },
+  async () => {
+    const child = await workflow('gate-child')
+    releaseGate()
+    return child
+  },
+])
+`,
+        {
+          runner: new ScriptedHarnessRunner(() => 'never'),
+          resolveWorkflow: registry.resolve.bind(registry),
+          signal: controller.signal,
+        },
+      );
+
+      expect(result.result).toEqual(['gate released', 'child result']);
+      expect(result.logs).toEqual(['child ran']);
+    } finally {
+      clearTimeout(timeout);
+    }
   });
 
   it('replays nested identities after asynchronous parallel preparation', async () => {
@@ -336,15 +436,15 @@ return parallel([
     });
 
     expect(first.result).toEqual([
-      'prepared-parent/prepared-child',
-      'prepared-parent/prepared-child#2',
+      'prepared-parent/prepared-child@0.0.1',
+      'prepared-parent/prepared-child@0.1.1',
     ]);
     expect(second.result).toEqual(first.result);
     expect(second.cacheHits).toBe(4);
     expect(runner.calls).toHaveLength(4);
     expect(runner.calls.slice(2).map((call) => call.workflowPath)).toEqual([
-      'prepared-parent/prepared-child',
-      'prepared-parent/prepared-child#2',
+      'prepared-parent/prepared-child@0.1.1',
+      'prepared-parent/prepared-child@0.0.1',
     ]);
   });
 
@@ -383,8 +483,8 @@ return parallel([
     });
 
     expect(first.result).toEqual([
-      'arrival-parent/arrival-child',
-      'arrival-parent/arrival-child#2',
+      'arrival-parent/arrival-child@0.0.0',
+      'arrival-parent/arrival-child@0.1.0',
     ]);
     expect(second.result).toEqual(first.result);
     expect(second.cacheHits).toBe(2);
@@ -424,7 +524,7 @@ return { sequential, parallel: parallelResults }
 
     expect(first.result).toEqual({
       sequential: ['alias-parent/canonical-child', 'alias-parent/canonical-child#2'],
-      parallel: ['alias-parent/canonical-child#3', 'alias-parent/canonical-child#4'],
+      parallel: ['alias-parent/canonical-child@2.0.0', 'alias-parent/canonical-child@2.1.0'],
     });
     expect(second.result).toEqual(first.result);
     expect(second.cacheHits).toBe(4);

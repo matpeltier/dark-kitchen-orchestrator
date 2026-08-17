@@ -51,7 +51,6 @@ interface LogicalPosition {
 interface LogicalExecutionContext {
   readonly path: readonly number[];
   nextPosition: number;
-  readonly predecessors: readonly Promise<void>[];
 }
 
 const logicalExecution = new AsyncLocalStorage<LogicalExecutionContext>();
@@ -60,7 +59,9 @@ interface NestedInvocation {
   readonly position: LogicalPosition;
   /** Identity is reserved synchronously, before any resolver or preparation can complete. */
   readonly identity: string;
-  readonly ready: Promise<void>;
+  /** Dynamic branches use their logical identity instead of waiting to number display paths. */
+  readonly useLogicalPath: boolean;
+  ready: boolean;
   readonly markReady: () => void;
   childName?: string;
 }
@@ -99,7 +100,6 @@ interface RuntimeContext {
     basePath: string,
     nestedInvocations: NestedInvocationState,
     position: LogicalPosition,
-    predecessors: readonly Promise<void>[],
   ): Promise<unknown>;
 }
 
@@ -383,7 +383,6 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
     basePath,
     nestedInvocations,
     position,
-    predecessors,
   ) => {
     const invocation = reserveNestedInvocation(nestedInvocations, position);
     const promise = abortable(
@@ -408,24 +407,18 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
           const childName = resolved.name ?? parsed.meta.name;
           invocation.childName = childName;
 
-          // Wait for logically earlier invocations to publish their canonical names before
-          // assigning the human-readable occurrence suffix. The journal identity below is
-          // always based on the reserved logical position, so this ordering cannot affect
-          // replay keys when parallel preparation reaches workflow() out of order.
-          await abortable(
-            Promise.all(
-              nestedInvocations.entries
-                .filter((entry) => compareLogicalPositions(entry.position, invocation.position) < 0)
-                .map((entry) => entry.ready),
-            ),
-            signal,
-          );
-          await abortable(Promise.all(predecessors), signal);
           const occurrence = nestedInvocations.entries.filter(
             (entry) =>
               entry.childName === childName &&
               compareLogicalPositions(entry.position, invocation.position) <= 0,
           ).length;
+          const childPath = `${parentPath}/${encodeWorkflowPathComponent(childName)}${
+            invocation.useLogicalPath
+              ? `@${invocation.identity}`
+              : occurrence === 1
+                ? ''
+                : `#${occurrence}`
+          }`;
           throwIfAborted(options.signal, signal);
           invocation.markReady();
           throwIfAborted(options.signal, signal);
@@ -436,7 +429,7 @@ function createContext(options: WorkflowRunOptions, runId: string): RuntimeConte
               parsed.meta,
               context,
               args,
-              `${parentPath}/${encodeWorkflowPathComponent(childName)}${occurrence === 1 ? '' : `#${occurrence}`}`,
+              childPath,
               `${parentIdentityPath}/${encodeWorkflowPathComponent(childName)}@${invocation.identity}`,
               depth + 1,
               resolved.basePath ?? context.options.cwd ?? process.cwd(),
@@ -514,20 +507,11 @@ async function executeWorkflow(
     }
     const logicalContext = requireLogicalExecutionContext();
     const parallelPosition = allocateLogicalPosition(logicalContext);
-    const earlierEntries = nestedInvocations.entries
-      .filter((entry) => compareLogicalPositions(entry.position, parallelPosition) < 0)
-      .map((entry) => entry.ready);
-    const branches = thunks.map(() => deferred());
     return Promise.all(
       thunks.map((thunk, index) => {
         const branchContext: LogicalExecutionContext = {
           path: [...parallelPosition.segments, index],
           nextPosition: 0,
-          predecessors: [
-            ...logicalContext.predecessors,
-            ...earlierEntries,
-            ...branches.slice(0, index).map((branch) => branch.promise),
-          ],
         };
         return logicalExecution.run(branchContext, async () => {
           try {
@@ -536,8 +520,6 @@ async function executeWorkflow(
             if (isFatal(error)) throw error;
             log(`parallel item failed: ${errorMessage(error)}`);
             return null;
-          } finally {
-            branches[index]?.resolve();
           }
         });
       }),
@@ -555,39 +537,26 @@ async function executeWorkflow(
     }
     const logicalContext = requireLogicalExecutionContext();
     const pipelinePosition = allocateLogicalPosition(logicalContext);
-    const earlierEntries = nestedInvocations.entries
-      .filter((entry) => compareLogicalPositions(entry.position, pipelinePosition) < 0)
-      .map((entry) => entry.ready);
-    const branches = items.map(() => deferred());
     return Promise.all(
       items.map((item, index) => {
         const branchContext: LogicalExecutionContext = {
           path: [...pipelinePosition.segments, index],
           nextPosition: 0,
-          predecessors: [
-            ...logicalContext.predecessors,
-            ...earlierEntries,
-            ...branches.slice(0, index).map((branch) => branch.promise),
-          ],
         };
         return logicalExecution.run(branchContext, async () => {
-          try {
-            let value: unknown = item;
-            for (const stage of stages) {
-              try {
-                value = await (
-                  stage as (previous: unknown, original: unknown, itemIndex: number) => unknown
-                )(value, item, index);
-              } catch (error) {
-                if (isFatal(error)) throw error;
-                log(`pipeline item ${index} failed: ${errorMessage(error)}`);
-                return null;
-              }
+          let value: unknown = item;
+          for (const stage of stages) {
+            try {
+              value = await (
+                stage as (previous: unknown, original: unknown, itemIndex: number) => unknown
+              )(value, item, index);
+            } catch (error) {
+              if (isFatal(error)) throw error;
+              log(`pipeline item ${index} failed: ${errorMessage(error)}`);
+              return null;
             }
-            return value;
-          } finally {
-            branches[index]?.resolve();
           }
+          return value;
         });
       }),
     );
@@ -605,7 +574,6 @@ async function executeWorkflow(
       basePath,
       nestedInvocations,
       position,
-      logicalContext.predecessors,
     );
   };
   const budget: WorkflowBudget = Object.freeze({
@@ -855,19 +823,18 @@ function reserveNestedInvocation(
   state: NestedInvocationState,
   position: LogicalPosition,
 ): NestedInvocation {
-  let resolveReady: () => void = () => undefined;
-  const ready = new Promise<void>((resolve) => {
-    resolveReady = resolve;
-  });
-  let markedReady = false;
+  const useLogicalPath =
+    position.segments.length > 1 ||
+    state.entries.some(
+      (entry) => compareLogicalPositions(entry.position, position) < 0 && !entry.ready,
+    );
   const invocation: NestedInvocation = {
     position,
     identity: logicalPositionKey(position),
-    ready,
+    useLogicalPath,
+    ready: false,
     markReady: () => {
-      if (markedReady) return;
-      markedReady = true;
-      resolveReady();
+      invocation.ready = true;
     },
   };
   state.entries.push(invocation);
@@ -876,9 +843,8 @@ function reserveNestedInvocation(
 
 function createLogicalExecutionContext(
   pathSegments: readonly number[] = [],
-  predecessors: readonly Promise<void>[] = [],
 ): LogicalExecutionContext {
-  return { path: pathSegments, nextPosition: 0, predecessors };
+  return { path: pathSegments, nextPosition: 0 };
 }
 
 function requireLogicalExecutionContext(): LogicalExecutionContext {
@@ -913,14 +879,6 @@ function stablePositionNumber(position: LogicalPosition): number {
     hash = Math.imul(hash, 16777619);
   }
   return hash >>> 0 || 1;
-}
-
-function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
-  let resolvePromise: () => void = () => undefined;
-  const promise = new Promise<void>((resolve) => {
-    resolvePromise = resolve;
-  });
-  return { promise, resolve: resolvePromise };
 }
 
 function encodeWorkflowPathComponent(value: string): string {
