@@ -1,8 +1,8 @@
-import type { Tracker } from '@dark-kitchen/core';
+import type { TrackerAdapter } from '@dark-kitchen/core';
 
 /** Composition input for the future HTTP control plane. */
 export interface ApiDependencies {
-  readonly tracker: Tracker;
+  readonly tracker: TrackerAdapter;
 }
 
 /**

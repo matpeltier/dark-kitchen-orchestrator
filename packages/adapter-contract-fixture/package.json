@@ -1,0 +1,13 @@
+{
+  "name": "@dark-kitchen/adapter-contract-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@dark-kitchen/core": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --noEmit"
+  }
+}
