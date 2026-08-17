@@ -167,6 +167,7 @@ describe('GitHub SCM adapter', () => {
       },
     });
     expect(pullRequest.id).toBe('acme/kitchen#1');
+    expect(pullRequest.url).toBe('https://github.com/acme/kitchen/pull/1');
 
     const merged = await adapter.mergePullRequest({
       pullRequestId: pullRequest.id,
@@ -260,6 +261,23 @@ describe('GitHub SCM adapter', () => {
     expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
   });
 
+  it('refuses a merge strategy that differs from the configured policy', async () => {
+    const api = new GitHubApiFixture();
+    const adapter = new GitHubScmAdapter({ api, mergeStrategy: 'squash' });
+    await adapter.getRepository({ provider: 'github', id: 'acme/kitchen' });
+    const pullRequest = await adapter.createPullRequest({
+      repositoryId,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      title: 'Policy check',
+    });
+
+    await expect(
+      adapter.mergePullRequest({ pullRequestId: pullRequest.id, mergeStrategy: 'rebase' }),
+    ).rejects.toThrow('configured strategy is squash');
+    expect(api.requests.some((request) => request.path.endsWith('/pulls/1/merge'))).toBe(false);
+  });
+
   it('links an external tracker task without GitHub close syntax', () => {
     const content = buildGitHubPullRequestContent({
       repositoryId,
@@ -299,5 +317,20 @@ describe('GitHub SCM adapter', () => {
 
     expect(content.body).toContain('Closes other/repo#42');
     expect(content.body).not.toContain('Closes #42');
+  });
+
+  it('qualifies a same-repository GitHub tracker issue when only its number is normalized', () => {
+    const content = buildGitHubPullRequestContent({
+      repositoryId,
+      sourceBranch: 'feature/task-1',
+      targetBranch: 'main',
+      task: {
+        taskId: createTaskId('42'),
+        title: 'Link the local issue',
+        trackerReference: { provider: 'github', id: '#42' },
+      },
+    });
+
+    expect(content.body).toContain('Closes acme/kitchen#42');
   });
 });

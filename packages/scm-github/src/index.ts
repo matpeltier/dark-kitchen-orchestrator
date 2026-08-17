@@ -65,9 +65,9 @@ interface GitHubRepositoryResponse {
   readonly full_name: string;
   readonly name: string;
   readonly default_branch: string;
-  readonly html_url?: string;
-  readonly clone_url?: string;
-  readonly ssh_url?: string;
+  readonly html_url?: string | null;
+  readonly clone_url?: string | null;
+  readonly ssh_url?: string | null;
 }
 
 interface GitHubPullRequestResponse {
@@ -75,7 +75,7 @@ interface GitHubPullRequestResponse {
   readonly title: string;
   readonly state: 'open' | 'closed';
   readonly merged_at?: string | null;
-  readonly html_url?: string;
+  readonly html_url?: string | null;
   readonly merge_commit_sha?: string | null;
   readonly head: { readonly ref: string; readonly sha: string };
   readonly base: { readonly ref: string; readonly sha: string };
@@ -247,8 +247,9 @@ export function buildGitHubPullRequestContent(input: CreatePullRequestInput): {
 
   if (tracker?.provider.toLowerCase() === 'github') {
     const issue = githubIssueReference(tracker);
-    if (issue?.repository !== undefined) {
-      lines.push(`Closes ${issue.repository}#${issue.number}`);
+    const repository = issue?.repository ?? githubRepositoryName(String(input.repositoryId));
+    if (issue !== undefined && repository !== undefined) {
+      lines.push(`Closes ${repository}#${issue.number}`);
     }
   }
   if (task.description?.trim()) {
@@ -292,13 +293,22 @@ export class GitHubScmAdapter implements ScmAdapter {
     const configuredPolicy = options.mergePolicy ?? {};
     this.mergePolicy = {
       strategy: options.mergeStrategy ?? configuredPolicy.strategy ?? 'squash',
-      requiredChecks: [...(options.requiredChecks ?? configuredPolicy.requiredChecks ?? [])],
+      requiredChecks: normalizeRequiredChecks(
+        options.requiredChecks ?? configuredPolicy.requiredChecks ?? [],
+      ),
       checkTimeoutMs: options.checkTimeoutMs ?? configuredPolicy.checkTimeoutMs ?? 300_000,
       pollIntervalMs: options.pollIntervalMs ?? configuredPolicy.pollIntervalMs ?? 10_000,
     };
 
-    if (this.mergePolicy.checkTimeoutMs < 0 || this.mergePolicy.pollIntervalMs < 0) {
-      throw new Error('GitHub SCM check timeout and poll interval must not be negative.');
+    if (
+      !Number.isFinite(this.mergePolicy.checkTimeoutMs) ||
+      !Number.isFinite(this.mergePolicy.pollIntervalMs) ||
+      this.mergePolicy.checkTimeoutMs < 0 ||
+      this.mergePolicy.pollIntervalMs < 0
+    ) {
+      throw new Error(
+        'GitHub SCM check timeout and poll interval must be finite and non-negative.',
+      );
     }
   }
 
@@ -310,14 +320,15 @@ export class GitHubScmAdapter implements ScmAdapter {
     const fullName = response.full_name || repositoryName;
     const repositoryId = createRepositoryId(fullName);
     const remoteUrl =
-      response.clone_url ?? response.ssh_url ?? `https://github.com/${fullName}.git`;
+      firstNonEmpty(response.clone_url, response.ssh_url) ?? `https://github.com/${fullName}.git`;
+    const repositoryUrl = firstNonEmpty(response.html_url);
     const repository: Repository = {
       id: repositoryId,
       name: response.name || fullName.slice(fullName.indexOf('/') + 1),
       reference: {
         provider: this.provider,
         id: fullName,
-        ...(response.html_url === undefined ? {} : { url: response.html_url }),
+        ...(repositoryUrl === undefined ? {} : { url: repositoryUrl }),
       },
       defaultBranch: requireText(response.default_branch, 'GitHub repository default branch'),
       remoteUrl,
@@ -364,7 +375,10 @@ export class GitHubScmAdapter implements ScmAdapter {
   ): Promise<PullRequest> {
     const repository = await this.getCachedRepository(repositoryId);
     const parsed = parsePullRequestReference(String(pullRequestId));
-    if (parsed.repository !== undefined && parsed.repository !== repository.reference.id) {
+    if (
+      parsed.repository !== undefined &&
+      parsed.repository.toLowerCase() !== repository.reference.id.toLowerCase()
+    ) {
       throw new ScmMergeError(
         `Pull request ${pullRequestId} does not belong to repository ${repositoryId}.`,
       );
@@ -459,8 +473,14 @@ export class GitHubScmAdapter implements ScmAdapter {
   }
 
   public async waitForChecks(input: WaitForChecksInput): Promise<readonly Check[]> {
-    const timeoutMs = input.timeoutMs ?? this.mergePolicy.checkTimeoutMs;
-    const pollIntervalMs = input.pollIntervalMs ?? this.mergePolicy.pollIntervalMs;
+    const timeoutMs = nonNegativeFinite(
+      input.timeoutMs ?? this.mergePolicy.checkTimeoutMs,
+      'Check timeout',
+    );
+    const pollIntervalMs = nonNegativeFinite(
+      input.pollIntervalMs ?? this.mergePolicy.pollIntervalMs,
+      'Check poll interval',
+    );
     const deadline = this.now() + timeoutMs;
     while (true) {
       const checks = await this.listChecks(input.pullRequestId);
@@ -597,6 +617,7 @@ export class GitHubScmAdapter implements ScmAdapter {
     response: GitHubPullRequestResponse,
   ): PullRequest {
     const id = createPullRequestId(`${repository.reference.id}#${response.number}`);
+    const pullRequestUrl = firstNonEmpty(response.html_url);
     const pullRequest: PullRequest = {
       id,
       repositoryId: repository.id,
@@ -613,8 +634,9 @@ export class GitHubScmAdapter implements ScmAdapter {
       reference: {
         provider: this.provider,
         id: `${repository.reference.id}#${response.number}`,
-        ...(response.html_url === undefined ? {} : { url: response.html_url }),
+        ...(pullRequestUrl === undefined ? {} : { url: pullRequestUrl }),
       },
+      ...(pullRequestUrl === undefined ? {} : { url: pullRequestUrl }),
       headSha: response.head.sha,
       baseSha: response.base.sha,
       ...(response.merge_commit_sha === undefined || response.merge_commit_sha === null
@@ -669,7 +691,7 @@ function parseRepositoryReference(reference: ScmReference): string {
   if (reference.provider.toLowerCase() !== 'github') {
     throw new ScmMergeError(`GitHub SCM cannot operate on ${reference.provider} references.`);
   }
-  const candidate = reference.url ?? reference.id;
+  const candidate = (reference.url ?? reference.id).trim();
   const fromApiUrl = candidate.match(
     /github\.com\/repos\/([^/]+)\/([^/#?]+?)(?:\.git)?(?:[#/?].*)?$/i,
   );
@@ -683,7 +705,7 @@ function parseRepositoryReference(reference: ScmReference): string {
   if (!/^([^/]+)\/([^/]+)$/.test(fullName)) {
     throw new ScmMergeError(`Invalid GitHub repository reference: ${candidate}.`);
   }
-  return fullName;
+  return fullName.toLowerCase();
 }
 
 function parsePullRequestReference(value: string): {
@@ -695,7 +717,11 @@ function parsePullRequestReference(value: string): {
   const numberMatch = value.match(/^\d+$/);
   const repository = urlMatch?.[1] ?? repositoryMatch?.[1];
   const numberText = urlMatch?.[2] ?? repositoryMatch?.[2] ?? numberMatch?.[0];
-  if (numberText === undefined) {
+  if (
+    numberText === undefined ||
+    !Number.isSafeInteger(Number(numberText)) ||
+    Number(numberText) < 1
+  ) {
     throw new ScmMergeError(`Invalid GitHub pull request reference: ${value}.`);
   }
   return { ...(repository === undefined ? {} : { repository }), number: Number(numberText) };
@@ -712,9 +738,16 @@ function normalizeBranchName(value: string): string {
   const branch = value.trim().replace(/^refs\/heads\//, '');
   if (
     branch.length === 0 ||
+    branch === '.' ||
+    branch === '..' ||
     branch.includes('..') ||
     branch.startsWith('/') ||
-    branch.endsWith('/')
+    branch.endsWith('/') ||
+    branch.includes('//') ||
+    branch.includes('@{') ||
+    /[~^:?*[\\]/.test(branch) ||
+    [...branch].some((character) => character.charCodeAt(0) < 0x20) ||
+    branch.split('/').some((part) => part === '.' || part === '..' || part.endsWith('.lock'))
   ) {
     throw new ScmMergeError(`Invalid GitHub branch name: ${value}.`);
   }
@@ -738,6 +771,28 @@ function githubIssueReference(reference: {
   }
   const issueNumber = reference.id.match(/(?:^|#)(\d+)$/)?.[1];
   return issueNumber === undefined ? undefined : { number: issueNumber };
+}
+
+function githubRepositoryName(value: string): string | undefined {
+  return /^([^/]+\/[^/]+)$/.test(value) ? value : undefined;
+}
+
+function normalizeRequiredChecks(checks: readonly string[]): readonly string[] {
+  const normalized = new Set<string>();
+  for (const check of checks) {
+    const name = check.trim();
+    if (name.length === 0) {
+      throw new Error('GitHub SCM required check names must not be empty.');
+    }
+    normalized.add(name);
+  }
+  return [...normalized];
+}
+
+function firstNonEmpty(...values: readonly (string | null | undefined)[]): string | undefined {
+  return values.find(
+    (value): value is string => value !== undefined && value !== null && value.trim().length > 0,
+  );
 }
 
 const execFile = promisify(execFileCallback);
@@ -837,9 +892,16 @@ function isGitHubStatus(error: unknown, status: number): error is GitHubApiError
   return error instanceof GitHubApiError && error.status === status;
 }
 
-function requireText(value: string | undefined, label: string): string {
-  if (value === undefined || value.trim().length === 0) {
+function requireText(value: string | null | undefined, label: string): string {
+  if (value === undefined || value === null || value.trim().length === 0) {
     throw new ScmMergeError(`${label} must not be empty.`);
+  }
+  return value;
+}
+
+function nonNegativeFinite(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new ScmMergeError(`${label} must be a finite non-negative number.`);
   }
   return value;
 }
