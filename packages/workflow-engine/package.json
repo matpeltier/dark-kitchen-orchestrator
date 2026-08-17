@@ -1,0 +1,21 @@
+{
+  "name": "@dark-kitchen/workflow-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Provider-neutral, code-first workflow orchestration for Dark Kitchen",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "typescript": "5.7.2"
+  }
+}

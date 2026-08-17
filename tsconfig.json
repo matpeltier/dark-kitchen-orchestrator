@@ -1,4 +1,8 @@
 {
   "files": [],
-  "references": [{ "path": "./packages/core" }, { "path": "./apps/api" }]
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/workflow-engine" },
+    { "path": "./apps/api" }
+  ]
 }
