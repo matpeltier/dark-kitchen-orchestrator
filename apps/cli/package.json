@@ -1,8 +1,12 @@
 {
-  "name": "@dark-kitchen/cli",
+  "name": "dark-kitchen",
   "version": "0.1.0",
-  "private": true,
+  "description": "Autonomous coding agent control plane — connects trackers, git, coding agents, and human channels",
+  "private": false,
   "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
   "bin": {
     "dark-kitchen": "./dist/cli.js",
     "dk": "./dist/cli.js"
@@ -13,15 +17,27 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc --build",
     "typecheck": "tsc --noEmit"
   },
+  "keywords": [
+    "ai",
+    "agent",
+    "autonomous",
+    "coding",
+    "control-plane",
+    "dark-kitchen"
+  ],
+  "license": "MIT",
   "devDependencies": {
     "@types/js-yaml": "4.0.9"
   },
   "dependencies": {
-    "js-yaml": "4.1.0",
     "@dark-kitchen/channels": "workspace:*",
     "@dark-kitchen/config": "workspace:*",
     "@dark-kitchen/core": "workspace:*",
@@ -33,6 +49,7 @@
     "@dark-kitchen/tracker": "workspace:*",
     "@dark-kitchen/workflow-engine": "workspace:*",
     "@dark-kitchen/workflows": "workspace:*",
-    "@dark-kitchen/workspace-manager": "workspace:*"
+    "@dark-kitchen/workspace-manager": "workspace:*",
+    "js-yaml": "4.1.0"
   }
 }
