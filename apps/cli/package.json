@@ -1,0 +1,36 @@
+{
+  "name": "@dark-kitchen/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dark-kitchen": "./dist/cli.js",
+    "dk": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "4.0.9"
+  },
+  "dependencies": {
+    "js-yaml": "4.1.0",
+    "@dark-kitchen/channels": "workspace:*",
+    "@dark-kitchen/config": "workspace:*",
+    "@dark-kitchen/core": "workspace:*",
+    "@dark-kitchen/harness": "workspace:*",
+    "@dark-kitchen/mcp": "workspace:*",
+    "@dark-kitchen/runtime": "workspace:*",
+    "@dark-kitchen/runtime-store-sqlite": "workspace:*",
+    "@dark-kitchen/scm": "workspace:*",
+    "@dark-kitchen/tracker": "workspace:*",
+    "@dark-kitchen/workspace-manager": "workspace:*"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@dark-kitchen/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "dark-kitchen-mcp": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dark-kitchen/channels": "workspace:*",
+    "@dark-kitchen/config": "workspace:*",
+    "@dark-kitchen/core": "workspace:*",
+    "@dark-kitchen/runtime": "workspace:*",
+    "@dark-kitchen/scm": "workspace:*",
+    "@dark-kitchen/tracker": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}
