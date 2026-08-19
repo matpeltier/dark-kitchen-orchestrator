@@ -7,9 +7,6 @@
 
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createServer } from 'node:net';
-import type { DarkKitchenConfig } from '@dark-kitchen/config';
-import { ConfigStore } from '@dark-kitchen/config';
 import { SqliteRuntimeStore } from '@dark-kitchen/runtime-store-sqlite';
 import { InterventionService } from '@dark-kitchen/runtime';
 import { ChannelGateway } from '@dark-kitchen/channels';
@@ -116,7 +113,7 @@ export class DarkKitchenDaemon {
         process.kill(lockData.pid, 0); // signal 0 = existence check
         throw new Error(
           `Another Dark Kitchen daemon is already running (pid ${lockData.pid}). ` +
-          `Stop it first with 'dk stop'.`,
+            `Stop it first with 'dk stop'.`,
         );
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'ESRCH') {
@@ -128,7 +125,11 @@ export class DarkKitchenDaemon {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
     }
-    await writeFile(lockPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), 'utf8');
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }),
+      'utf8',
+    );
   }
 
   private async writeState(databasePath: string): Promise<void> {
@@ -138,13 +139,23 @@ export class DarkKitchenDaemon {
       projectRoot: this.options.projectRoot,
       databasePath,
     };
-    await writeFile(join(this.dataDir, 'daemon.state.json'), JSON.stringify(state, null, 2), 'utf8');
+    await writeFile(
+      join(this.dataDir, 'daemon.state.json'),
+      JSON.stringify(state, null, 2),
+      'utf8',
+    );
   }
 
-  private log(level: 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>): void {
+  private log(
+    level: 'info' | 'warn' | 'error',
+    message: string,
+    meta?: Record<string, unknown>,
+  ): void {
     const format = this.options.logFormat ?? 'human';
     if (format === 'json') {
-      process.stderr.write(JSON.stringify({ level, message, ...meta, t: new Date().toISOString() }) + '\n');
+      process.stderr.write(
+        JSON.stringify({ level, message, ...meta, t: new Date().toISOString() }) + '\n',
+      );
     } else {
       const metaStr = meta ? ' ' + JSON.stringify(meta) : '';
       process.stderr.write(`[${level.toUpperCase()}] ${message}${metaStr}\n`);

@@ -121,6 +121,15 @@ importers:
         specifier: workspace:*
         version: link:../process-execution
 
+  packages/harness-deepseek:
+    dependencies:
+      '@dark-kitchen/core':
+        specifier: workspace:*
+        version: link:../core
+      '@dark-kitchen/harness':
+        specifier: workspace:*
+        version: link:../harness
+
   packages/mcp:
     dependencies:
       '@dark-kitchen/channels':
@@ -158,6 +167,12 @@ importers:
       '@dark-kitchen/runtime-store-sqlite':
         specifier: workspace:*
         version: link:../runtime-store-sqlite
+      '@dark-kitchen/scm':
+        specifier: workspace:*
+        version: link:../scm
+      '@dark-kitchen/tracker':
+        specifier: workspace:*
+        version: link:../tracker
       '@dark-kitchen/workflow-engine':
         specifier: workspace:*
         version: link:../workflow-engine
@@ -186,7 +201,22 @@ importers:
         specifier: 21.1.1
         version: 21.1.1
 
+  packages/verification:
+    dependencies:
+      '@dark-kitchen/config':
+        specifier: workspace:*
+        version: link:../config
+      '@dark-kitchen/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/workflow-engine: {}
+
+  packages/workflows:
+    dependencies:
+      '@dark-kitchen/workflow-engine':
+        specifier: workspace:*
+        version: link:../workflow-engine
 
   packages/workspace-manager:
     dependencies:

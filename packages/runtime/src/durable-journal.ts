@@ -127,7 +127,9 @@ export class SqliteDurableJournal implements JournalStore {
   public async set(callKey: string, result: WorkflowStepResult): Promise<void> {
     await this.ensureDb();
     const now = new Date().toISOString();
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO workflow_journal (call_key, workflow_run_id, result, status, attempts, started_at, completed_at)
       VALUES (?, ?, ?, 'completed', 1, ?, ?)
       ON CONFLICT(call_key) DO UPDATE SET
@@ -135,7 +137,9 @@ export class SqliteDurableJournal implements JournalStore {
         status = 'completed',
         attempts = attempts + 1,
         completed_at = excluded.completed_at
-    `).run(callKey, this.workflowRunId, JSON.stringify(result), now, now);
+    `,
+      )
+      .run(callKey, this.workflowRunId, JSON.stringify(result), now, now);
   }
 
   public close(): void {

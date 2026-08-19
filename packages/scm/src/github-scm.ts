@@ -10,18 +10,13 @@
 import { Octokit } from '@octokit/rest';
 import type {
   Check,
-  CheckId,
   PullRequest,
   PullRequestId,
   Repository,
   RepositoryId,
   ScmReference,
 } from '@dark-kitchen/core';
-import {
-  createCheckId,
-  createPullRequestId,
-  createRepositoryId,
-} from '@dark-kitchen/core';
+import { createCheckId, createPullRequestId, createRepositoryId } from '@dark-kitchen/core';
 import type {
   CheckPollPolicy,
   CreatePullRequestInput,
@@ -29,11 +24,7 @@ import type {
   MergePullRequestInput,
   PushBranchInput,
 } from './contracts.js';
-import {
-  ChecksFailedError,
-  MergeRefusedError,
-  ScmError,
-} from './contracts.js';
+import { ChecksFailedError, MergeRefusedError, ScmError } from './contracts.js';
 
 export interface GitHubScmAdapterConfig {
   readonly owner: string;
@@ -152,8 +143,8 @@ export class GitHubScmAdapter implements FullScmAdapter {
     const deadline = Date.now() + policy.timeoutMs;
     while (Date.now() < deadline) {
       const checks = await this.listChecks(pullRequestId);
-      const allTerminal = checks.every((c) =>
-        c.status === 'passed' || c.status === 'failed' || c.status === 'cancelled',
+      const allTerminal = checks.every(
+        (c) => c.status === 'passed' || c.status === 'failed' || c.status === 'cancelled',
       );
       if (allTerminal) return checks;
       await sleep(policy.intervalMs);
@@ -190,7 +181,8 @@ export class GitHubScmAdapter implements FullScmAdapter {
       }
     }
 
-    const mergeMethod = input.strategy === 'squash' ? 'squash' : input.strategy === 'rebase' ? 'rebase' : 'merge';
+    const mergeMethod =
+      input.strategy === 'squash' ? 'squash' : input.strategy === 'rebase' ? 'rebase' : 'merge';
 
     try {
       await this.octokit.pulls.merge({
@@ -217,7 +209,7 @@ export class GitHubScmAdapter implements FullScmAdapter {
       repo: this.config.repo,
       pull_number: prNumber,
     });
-    return data.state === 'closed' && (data.merged === true);
+    return data.state === 'closed' && data.merged === true;
   }
 }
 
@@ -296,7 +288,9 @@ export class MockScmAdapter implements FullScmAdapter {
     _repositoryId: RepositoryId,
     sourceBranch: string,
   ): Promise<PullRequest | undefined> {
-    const pr = [...this.prs.values()].find((p) => p.sourceBranch === sourceBranch && p.state === 'open');
+    const pr = [...this.prs.values()].find(
+      (p) => p.sourceBranch === sourceBranch && p.state === 'open',
+    );
     return pr ? normalizeMockPr(pr) : undefined;
   }
 
@@ -372,16 +366,25 @@ function buildPrBody(input: CreatePullRequestInput): string {
 
 function normalizePullRequest(
   data: {
-    number: number; title: string; body?: string | null; state: string;
-    head: { ref: string }; base: { ref: string }; html_url: string; merged?: boolean | null;
+    number: number;
+    title: string;
+    body?: string | null;
+    state: string;
+    head: { ref: string };
+    base: { ref: string };
+    html_url: string;
+    merged?: boolean | null;
   },
   owner: string,
   repo: string,
 ): PullRequest {
   const id = createPullRequestId(`${PROVIDER}:${owner}/${repo}#${data.number}`);
   const repositoryId = createRepositoryId(`${PROVIDER}:${owner}/${repo}`);
-  const status: PullRequest['status'] =
-    data.merged ? 'merged' : data.state === 'closed' ? 'closed' : 'open';
+  const status: PullRequest['status'] = data.merged
+    ? 'merged'
+    : data.state === 'closed'
+      ? 'closed'
+      : 'open';
   return {
     id,
     repositoryId,
@@ -397,8 +400,11 @@ function normalizePullRequest(
 function normalizeMockPr(pr: MockPullRequest): PullRequest {
   const id = createPullRequestId(`${PROVIDER}:mock#${pr.number}`);
   const repositoryId = createRepositoryId(`${PROVIDER}:mock`);
-  const status: PullRequest['status'] =
-    pr.merged ? 'merged' : pr.state === 'open' ? 'open' : 'closed';
+  const status: PullRequest['status'] = pr.merged
+    ? 'merged'
+    : pr.state === 'open'
+      ? 'open'
+      : 'closed';
   return {
     id,
     repositoryId,
@@ -424,10 +430,7 @@ function normalizeCheck(
   };
 }
 
-function mapCheckStatus(
-  status: string | null,
-  conclusion: string | null,
-): Check['status'] {
+function mapCheckStatus(status: string | null, conclusion: string | null): Check['status'] {
   if (status === 'queued' || status === 'waiting') return 'queued';
   if (status === 'in_progress') return 'running';
   if (status === 'completed') {

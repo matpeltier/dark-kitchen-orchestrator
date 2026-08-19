@@ -3,6 +3,7 @@
 This package contains code adapted from:
 
 **codex-dynamic-workflows**
+
 - Source: https://github.com/six-ddc/codex-dynamic-workflows
 - License: MIT
 - Author: six-ddc
@@ -10,6 +11,7 @@ This package contains code adapted from:
 The workflow engine concepts (workflow parsing/runtime, agent(), parallel execution, pipelines, nested workflows, phases, retries, concurrency limits, progress events, journals, and stable agent-call keys) were inspired by and partially adapted from this upstream project.
 
 Significant changes made in Dark Kitchen's adaptation:
+
 - Removed provider enums (codex | gemini | pi) and all OpenAI/Codex SDK dependencies.
 - Replaced provider-specific types with a generic `HarnessRunner`/`RoleResolver` contract.
 - Added mandatory semantic `role` requirement for every `agent()` call; no fallback to labels or arrival-order IDs.

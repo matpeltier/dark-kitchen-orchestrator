@@ -114,7 +114,7 @@ export class ChannelGateway {
    */
   public async notify(message: OutboundMessage, transportId?: string): Promise<void> {
     const targets = transportId
-      ? [this.transports.get(transportId)].filter(Boolean) as ChannelTransport[]
+      ? ([this.transports.get(transportId)].filter(Boolean) as ChannelTransport[])
       : [...this.transports.values()];
 
     for (const transport of targets) {
@@ -155,7 +155,9 @@ export class ChannelGateway {
     if (!interventionId) return;
 
     for (const handler of this.replyHandlers) {
-      const reply: { body: string; actionValue?: string; senderId?: string } = { body: message.body };
+      const reply: { body: string; actionValue?: string; senderId?: string } = {
+        body: message.body,
+      };
       if (message.actionValue) Object.assign(reply, { actionValue: message.actionValue });
       if (message.senderId) Object.assign(reply, { senderId: message.senderId });
       await handler(interventionId, reply);
@@ -165,7 +167,10 @@ export class ChannelGateway {
   private findInterventionForConversation(address: ChannelAddress): InterventionId | undefined {
     // Look up by conversation ID across all correlations
     for (const [, corr] of [...this.correlations['byMessageId'].entries()]) {
-      if (corr.address.channel === address.channel && corr.address.conversationId === address.conversationId) {
+      if (
+        corr.address.channel === address.channel &&
+        corr.address.conversationId === address.conversationId
+      ) {
         return corr.interventionId;
       }
     }
@@ -219,7 +224,7 @@ export class OpenClawTransport implements ChannelTransport {
         throw new Error(`OpenClaw API error: ${response.status}`);
       }
 
-      const data = await response.json() as { id?: string };
+      const data = (await response.json()) as { id?: string };
       return createChannelMessageId(data.id ?? `openclaw-${Date.now()}`);
     } catch {
       // Return a local ID for correlation; delivery will be retried

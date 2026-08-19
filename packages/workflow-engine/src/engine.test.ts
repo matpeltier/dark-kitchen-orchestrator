@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   runWorkflow,
   WorkflowCancelledError,
@@ -8,7 +8,6 @@ import {
   type RoleResolver,
   type HarnessRunner,
   type WorkflowFn,
-  CANCELLED,
 } from './index.js';
 
 function makeResolver(runners: Record<string, HarnessRunner>): RoleResolver {
@@ -24,10 +23,12 @@ function echoRunner(role: string): HarnessRunner {
 }
 
 function failingRunner(message: string): HarnessRunner {
-  return async () => { throw new Error(message); };
+  return async () => {
+    throw new Error(message);
+  };
 }
 
-function hangingRunner(): HarnessRunner {
+function _hangingRunner(): HarnessRunner {
   return async (_input, signal) =>
     new Promise<never>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
@@ -63,11 +64,22 @@ describe('agent()', () => {
     const journal = new InMemoryJournal();
     const callCount = { n: 0 };
     const resolver = makeResolver({
-      impl: async () => { callCount.n++; return 'first-result'; },
+      impl: async () => {
+        callCount.n++;
+        return 'first-result';
+      },
     });
 
-    await runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'p' }), { runId: 'run-1', journal, resolver });
-    await runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'p' }), { runId: 'run-1', journal, resolver });
+    await runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'p' }), {
+      runId: 'run-1',
+      journal,
+      resolver,
+    });
+    await runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'p' }), {
+      runId: 'run-1',
+      journal,
+      resolver,
+    });
 
     expect(callCount.n).toBe(1); // only called once; second run replayed
   });
@@ -101,12 +113,18 @@ describe('parallel()', () => {
         return 'ok';
       },
     });
-    await runWorkflow(async (b) => {
-      return b.parallel(
-        Array.from({ length: 6 }, (_, i) => async (cb: typeof b) => cb.agent({ role: 'impl', prompt: String(i) })),
-        { concurrency: 2 },
-      );
-    }, { runId: 'r', journal: new InMemoryJournal(), resolver });
+    await runWorkflow(
+      async (b) => {
+        return b.parallel(
+          Array.from(
+            { length: 6 },
+            (_, i) => async (cb: typeof b) => cb.agent({ role: 'impl', prompt: String(i) }),
+          ),
+          { concurrency: 2 },
+        );
+      },
+      { runId: 'r', journal: new InMemoryJournal(), resolver },
+    );
     expect(maxConcurrent).toBeLessThanOrEqual(2);
   });
 
@@ -114,7 +132,10 @@ describe('parallel()', () => {
     const journal = new InMemoryJournal();
     const callLog: string[] = [];
     const resolver = makeResolver({
-      impl: async (input) => { callLog.push(input.prompt); return `result:${input.prompt}`; },
+      impl: async (input) => {
+        callLog.push(input.prompt);
+        return `result:${input.prompt}`;
+      },
     });
     const opts = { runId: 'run-keys', journal, resolver };
 
@@ -146,11 +167,7 @@ describe('parallel()', () => {
 describe('pipeline()', () => {
   it('passes result of each step to the next', async () => {
     const result = await runWorkflow(async (b) => {
-      return b.pipeline(1, [
-        async (v) => v + 1,
-        async (v) => v * 3,
-        async (v) => v - 1,
-      ]);
+      return b.pipeline(1, [async (v) => v + 1, async (v) => v * 3, async (v) => v - 1]);
     }, defaultOptions());
     expect(result).toBe(5); // ((1+1)*3)-1
   });
@@ -174,7 +191,10 @@ describe('nested workflow()', () => {
     const journal = new InMemoryJournal();
     const calls: string[] = [];
     const resolver = makeResolver({
-      impl: async (input) => { calls.push(input.prompt); return input.prompt; },
+      impl: async (input) => {
+        calls.push(input.prompt);
+        return input.prompt;
+      },
     });
 
     const child: WorkflowFn<string> = async (b) => {
@@ -182,20 +202,26 @@ describe('nested workflow()', () => {
       return String(out.result);
     };
 
-    await runWorkflow(async (b) => {
-      // Two sequential calls of the same child workflow
-      const r1 = await b.workflow('child', child);
-      const r2 = await b.workflow('child', child);
-      return [r1, r2];
-    }, { runId: 'nested-keys', journal, resolver });
+    await runWorkflow(
+      async (b) => {
+        // Two sequential calls of the same child workflow
+        const r1 = await b.workflow('child', child);
+        const r2 = await b.workflow('child', child);
+        return [r1, r2];
+      },
+      { runId: 'nested-keys', journal, resolver },
+    );
 
     // Replay
     calls.length = 0;
-    await runWorkflow(async (b) => {
-      const r1 = await b.workflow('child', child);
-      const r2 = await b.workflow('child', child);
-      return [r1, r2];
-    }, { runId: 'nested-keys', journal, resolver });
+    await runWorkflow(
+      async (b) => {
+        const r1 = await b.workflow('child', child);
+        const r2 = await b.workflow('child', child);
+        return [r1, r2];
+      },
+      { runId: 'nested-keys', journal, resolver },
+    );
 
     expect(calls).toHaveLength(0); // all replayed
   });
@@ -204,7 +230,10 @@ describe('nested workflow()', () => {
     const journal = new InMemoryJournal();
     const callOrder: string[] = [];
     const resolver = makeResolver({
-      impl: async (input) => { callOrder.push(input.prompt); return input.prompt; },
+      impl: async (input) => {
+        callOrder.push(input.prompt);
+        return input.prompt;
+      },
     });
 
     const child: WorkflowFn<string> = async (b) => {
@@ -212,21 +241,27 @@ describe('nested workflow()', () => {
       return String(out.result);
     };
 
-    const makeFactory = (delayMs: number, name: string) =>
-      async (b: import('./engine.js').WorkflowBuilder) => {
+    const makeFactory =
+      (delayMs: number, name: string) => async (b: import('./engine.js').WorkflowBuilder) => {
         // Simulate async preparation before child workflow invocation
         await new Promise((r) => setTimeout(r, delayMs));
         return b.workflow(name, child);
       };
 
-    await runWorkflow(async (b) => {
-      return b.parallel([makeFactory(20, 'child'), makeFactory(0, 'child')]);
-    }, { runId: 'parallel-stable', journal, resolver });
+    await runWorkflow(
+      async (b) => {
+        return b.parallel([makeFactory(20, 'child'), makeFactory(0, 'child')]);
+      },
+      { runId: 'parallel-stable', journal, resolver },
+    );
 
     callOrder.length = 0;
-    await runWorkflow(async (b) => {
-      return b.parallel([makeFactory(20, 'child'), makeFactory(0, 'child')]);
-    }, { runId: 'parallel-stable', journal, resolver });
+    await runWorkflow(
+      async (b) => {
+        return b.parallel([makeFactory(20, 'child'), makeFactory(0, 'child')]);
+      },
+      { runId: 'parallel-stable', journal, resolver },
+    );
 
     expect(callOrder).toHaveLength(0); // all from journal
   });
@@ -244,9 +279,12 @@ describe('retry', () => {
         return 'ok';
       },
     });
-    const result = await runWorkflow(async (b) => {
-      return b.agent({ role: 'impl', prompt: 'x', retryPolicy: { maxAttempts: 3 } });
-    }, { runId: 'r', journal: new InMemoryJournal(), resolver });
+    const result = await runWorkflow(
+      async (b) => {
+        return b.agent({ role: 'impl', prompt: 'x', retryPolicy: { maxAttempts: 3 } });
+      },
+      { runId: 'r', journal: new InMemoryJournal(), resolver },
+    );
     expect(result.result).toBe('ok');
     expect(attempts).toBe(3);
   });
@@ -254,9 +292,12 @@ describe('retry', () => {
   it('throws after exhausting retries', async () => {
     const resolver = makeResolver({ impl: failingRunner('always fails') });
     await expect(
-      runWorkflow(async (b) => {
-        return b.agent({ role: 'impl', prompt: 'x', retryPolicy: { maxAttempts: 2 } });
-      }, { runId: 'r', journal: new InMemoryJournal(), resolver }),
+      runWorkflow(
+        async (b) => {
+          return b.agent({ role: 'impl', prompt: 'x', retryPolicy: { maxAttempts: 2 } });
+        },
+        { runId: 'r', journal: new InMemoryJournal(), resolver },
+      ),
     ).rejects.toBeInstanceOf(WorkflowAgentError);
   });
 });
@@ -288,21 +329,24 @@ describe('cancellation', () => {
 
   it('cancels a run-level signal covering all workflow code', async () => {
     const controller = new AbortController();
-    let sideEffect = false;
+    let _sideEffect = false;
 
-    const promise = runWorkflow(async (b) => {
-      // Workflow code awaiting a local promise with no runner call
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 1000);
-      });
-      sideEffect = true;
-      return 'should not reach';
-    }, {
-      runId: 'r',
-      journal: new InMemoryJournal(),
-      resolver: makeResolver({}),
-      signal: controller.signal,
-    });
+    const promise = runWorkflow(
+      async (_b) => {
+        // Workflow code awaiting a local promise with no runner call
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 1000);
+        });
+        _sideEffect = true;
+        return 'should not reach';
+      },
+      {
+        runId: 'r',
+        journal: new InMemoryJournal(),
+        resolver: makeResolver({}),
+        signal: controller.signal,
+      },
+    );
 
     // The workflow awaits a plain local promise — signal should still cancel it
     setTimeout(() => controller.abort(), 30);
@@ -325,21 +369,26 @@ describe('cancellation', () => {
     const resolver = makeResolver({
       impl: async (_input, signal) =>
         new Promise<never>((_, reject) =>
-          signal.addEventListener('abort', () => reject(new WorkflowCancelledError()), { once: true })
+          signal.addEventListener('abort', () => reject(new WorkflowCancelledError()), {
+            once: true,
+          }),
         ),
     });
 
-    const promise = runWorkflow(async (b) => {
-      // Enter a sub-workflow; runner will hang until abort
-      await b.workflow('child', child);
-      // This should not be reached after cancellation
-      await b.workflow('child', child);
-    }, {
-      runId: 'r',
-      journal: new InMemoryJournal(),
-      resolver,
-      signal: controller.signal,
-    });
+    const promise = runWorkflow(
+      async (b) => {
+        // Enter a sub-workflow; runner will hang until abort
+        await b.workflow('child', child);
+        // This should not be reached after cancellation
+        await b.workflow('child', child);
+      },
+      {
+        runId: 'r',
+        journal: new InMemoryJournal(),
+        resolver,
+        signal: controller.signal,
+      },
+    );
 
     setTimeout(() => controller.abort(), 20);
     await expect(promise).rejects.toBeInstanceOf(WorkflowCancelledError);
@@ -362,13 +411,17 @@ describe('concurrency cap', () => {
         return 'done';
       },
     });
-    await runWorkflow(async (b) => {
-      return b.parallel(
-        Array.from({ length: 10 }, (_, i) => async (cb: typeof b) =>
-          cb.agent({ role: 'impl', prompt: String(i) })
-        ),
-      );
-    }, { runId: 'r', journal: new InMemoryJournal(), resolver, concurrency: 3 });
+    await runWorkflow(
+      async (b) => {
+        return b.parallel(
+          Array.from(
+            { length: 10 },
+            (_, i) => async (cb: typeof b) => cb.agent({ role: 'impl', prompt: String(i) }),
+          ),
+        );
+      },
+      { runId: 'r', journal: new InMemoryJournal(), resolver, concurrency: 3 },
+    );
     expect(maxConcurrent).toBeLessThanOrEqual(3);
   });
 });
@@ -384,12 +437,15 @@ describe('stable call keys', () => {
       },
     });
     const journal = new InMemoryJournal();
-    await runWorkflow(async (b) => {
-      const r1 = await b.agent({ role: 'impl', prompt: '1' });
-      const r2 = await b.agent({ role: 'impl', prompt: '2' });
-      keys.push(r1.callKey, r2.callKey);
-      return null;
-    }, { runId: 'keys', journal, resolver });
+    await runWorkflow(
+      async (b) => {
+        const r1 = await b.agent({ role: 'impl', prompt: '1' });
+        const r2 = await b.agent({ role: 'impl', prompt: '2' });
+        keys.push(r1.callKey, r2.callKey);
+        return null;
+      },
+      { runId: 'keys', journal, resolver },
+    );
     expect(keys[0]).not.toBe(keys[1]);
   });
 });

@@ -91,7 +91,9 @@ async function cmdInit(): Promise<void> {
   } catch {
     const yaml = yamlDump(SAMPLE_GITHUB_ISSUES_CONFIG, { lineWidth: 120 });
     await writeFile(configPath, yaml, 'utf8');
-    print('Created .dark-kitchen/config.yaml with a sample GitHub Issues + GitHub SCM configuration.');
+    print(
+      'Created .dark-kitchen/config.yaml with a sample GitHub Issues + GitHub SCM configuration.',
+    );
     print('Edit it to match your project before running `dk start`.');
   }
 }
@@ -150,7 +152,9 @@ async function cmdDoctor(): Promise<void> {
 }
 
 async function cmdLogs(): Promise<void> {
-  print('Log streaming requires a running daemon. Check stderr output from `dk start --foreground`.');
+  print(
+    'Log streaming requires a running daemon. Check stderr output from `dk start --foreground`.',
+  );
 }
 
 async function cmdConfig(): Promise<void> {
@@ -170,13 +174,17 @@ async function cmdConfig(): Promise<void> {
 }
 
 async function cmdInterventions(): Promise<void> {
-  print('Interventions command requires a running daemon. Use Dark Kitchen MCP or API to manage interventions.');
+  print(
+    'Interventions command requires a running daemon. Use Dark Kitchen MCP or API to manage interventions.',
+  );
 }
 
 async function cmdCapabilities(): Promise<void> {
   const sub = args[1];
   if (sub === 'list') {
-    print('Capability list requires an active config. Use `dk config get` to see configured providers.');
+    print(
+      'Capability list requires an active config. Use `dk config get` to see configured providers.',
+    );
   } else if (sub === 'ensure') {
     print(`Capability ensure: connect to Dark Kitchen API to provision "${args[2] ?? '<id>'}"`);
   } else {

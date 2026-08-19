@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { GitWorktreeManager, buildWorktreeBranch, WorkspaceError } from './git-worktree-manager.js';
-import { createProjectId, createRepositoryId, createTaskId, createWorkspaceId } from '@dark-kitchen/core';
+import { createProjectId, createRepositoryId, createTaskId } from '@dark-kitchen/core';
 
 const execAsync = promisify(exec);
 
@@ -26,7 +26,10 @@ describe('buildWorktreeBranch', () => {
   });
 
   it('normalizes non-slug characters', () => {
-    const branch = buildWorktreeBranch(createTaskId('task/with/slashes'), createProjectId('my project'));
+    const branch = buildWorktreeBranch(
+      createTaskId('task/with/slashes'),
+      createProjectId('my project'),
+    );
     expect(branch).toMatch(/^dk\/my-project\/task-with-slashes$/);
   });
 });
@@ -51,7 +54,9 @@ describe('GitWorktreeManager - basic lifecycle', () => {
     const worktrees = await manager.listGitWorktrees().catch(() => []);
     for (const wt of worktrees) {
       if (wt.path !== repoDir) {
-        await execAsync(`git worktree remove --force '${wt.path}'`, { cwd: repoDir }).catch(() => {});
+        await execAsync(`git worktree remove --force '${wt.path}'`, { cwd: repoDir }).catch(
+          () => {},
+        );
       }
     }
     await rm(join(tmpdir(), `dk-wm-*`), { recursive: true, force: true }).catch(() => {});

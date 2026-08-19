@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { handleTool, ALL_TOOLS, TRACKER_TOOLS, CONFIG_TOOLS, RUNTIME_TOOLS, CAPABILITY_TOOLS } from './tools.js';
+import {
+  handleTool,
+  ALL_TOOLS,
+  TRACKER_TOOLS,
+  CONFIG_TOOLS,
+  RUNTIME_TOOLS,
+  CAPABILITY_TOOLS,
+} from './tools.js';
 import { MockTrackerAdapter } from '@dark-kitchen/tracker';
 import { createProjectId } from '@dark-kitchen/core';
 
@@ -57,7 +64,11 @@ describe('MCP tool handler - tracker', () => {
     await handleTool('dk_add_dependency', { taskId: idB, dependsOnTaskId: idC }, ctx);
 
     // A blocks C would create a cycle -> should fail
-    const cycleResult = await handleTool('dk_add_dependency', { taskId: idC, dependsOnTaskId: idA }, ctx);
+    const cycleResult = await handleTool(
+      'dk_add_dependency',
+      { taskId: idC, dependsOnTaskId: idA },
+      ctx,
+    );
     expect(cycleResult.success).toBe(false);
   });
 
@@ -84,7 +95,12 @@ describe('MCP tool handler - capabilities', () => {
   const config = {
     version: 1 as const,
     capabilityProviders: [
-      { managed: true as const, id: 'playwright', capability: 'browser.playwright', version: '>=1.40' },
+      {
+        managed: true as const,
+        id: 'playwright',
+        capability: 'browser.playwright',
+        version: '>=1.40',
+      },
     ],
   };
 
@@ -95,7 +111,11 @@ describe('MCP tool handler - capabilities', () => {
   });
 
   it('requests a provisioning plan without auto-approval', async () => {
-    const result = await handleTool('dk_request_capability_provisioning', { capabilityId: 'playwright' }, { config });
+    const result = await handleTool(
+      'dk_request_capability_provisioning',
+      { capabilityId: 'playwright' },
+      { config },
+    );
     expect(result.success).toBe(true);
     if (result.success) {
       const d = result.data as { plan: { requiresApproval: boolean }; message: string };
@@ -105,7 +125,11 @@ describe('MCP tool handler - capabilities', () => {
   });
 
   it('approves a provisioning plan when approve:true', async () => {
-    const result = await handleTool('dk_request_capability_provisioning', { capabilityId: 'playwright', approve: true }, { config });
+    const result = await handleTool(
+      'dk_request_capability_provisioning',
+      { capabilityId: 'playwright', approve: true },
+      { config },
+    );
     expect(result.success).toBe(true);
     if (result.success) {
       const d = result.data as { executed: boolean };
@@ -116,9 +140,15 @@ describe('MCP tool handler - capabilities', () => {
   it('rejects provisioning of user-managed capability', async () => {
     const cfg = {
       version: 1 as const,
-      capabilityProviders: [{ managed: false as const, id: 'custom-tool', capability: 'custom.tool' }],
+      capabilityProviders: [
+        { managed: false as const, id: 'custom-tool', capability: 'custom.tool' },
+      ],
     };
-    const result = await handleTool('dk_request_capability_provisioning', { capabilityId: 'custom-tool' }, { config: cfg });
+    const result = await handleTool(
+      'dk_request_capability_provisioning',
+      { capabilityId: 'custom-tool' },
+      { config: cfg },
+    );
     expect(result.success).toBe(false);
   });
 });

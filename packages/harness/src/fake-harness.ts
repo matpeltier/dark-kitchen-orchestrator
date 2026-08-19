@@ -7,7 +7,6 @@ import type { AgentSessionId } from '@dark-kitchen/core';
 import { createAgentSessionId } from '@dark-kitchen/core';
 import type {
   HarnessEventHandler,
-  HarnessProfile,
   HarnessRuntime,
   HarnessSession,
   StartSessionInput,
@@ -45,7 +44,9 @@ export class FakeHarnessRuntime implements HarnessRuntime {
   }
 
   public async startSession(input: StartSessionInput): Promise<HarnessSession> {
-    const sessionId = createAgentSessionId(`fake-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const sessionId = createAgentSessionId(
+      `fake-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
     const session: FakeSession = {
       id: sessionId,
       runId: input.runId,
@@ -113,7 +114,9 @@ export class FakeHarnessRuntime implements HarnessRuntime {
       this.subscribers.set(sessionId, new Set());
     }
     this.subscribers.get(sessionId)!.add(handler);
-    return () => { this.subscribers.get(sessionId)?.delete(handler); };
+    return () => {
+      this.subscribers.get(sessionId)?.delete(handler);
+    };
   }
 
   private emit(sessionId: AgentSessionId, event: Parameters<HarnessEventHandler>[0]): void {

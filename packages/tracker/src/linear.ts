@@ -14,11 +14,7 @@ import type {
   TaskDependencyId,
   TrackerReference,
 } from '@dark-kitchen/core';
-import {
-  createProjectId,
-  createTaskId,
-  createTaskDependencyId,
-} from '@dark-kitchen/core';
+import { createProjectId, createTaskId, createTaskDependencyId } from '@dark-kitchen/core';
 import type {
   AddDependencyInput,
   CommentInput,
@@ -66,11 +62,14 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
 
   public async getProject(reference: TrackerReference): Promise<Project> {
     // Linear "project" maps to a team or project
-    const result = await this.graphql<{ team: { id: string; name: string } }>(`
+    const result = await this.graphql<{ team: { id: string; name: string } }>(
+      `
       query GetTeam($key: String!) {
         team(key: $key) { id name }
       }
-    `, { key: reference.id });
+    `,
+      { key: reference.id },
+    );
     const team = result.team;
     if (!team) throw new TrackerError(`Linear team "${reference.id}" not found`);
     const projectId = createProjectId(`${PROVIDER}:${reference.id}`);
@@ -85,11 +84,14 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
   }
 
   public async getTask(reference: TrackerReference): Promise<Task> {
-    const result = await this.graphql<{ issue: LinearIssue }>(`
+    const result = await this.graphql<{ issue: LinearIssue }>(
+      `
       query GetIssue($id: String!) {
         issue(id: $id) { id identifier title description state { name } labels { nodes { name } } createdAt updatedAt url }
       }
-    `, { id: reference.id });
+    `,
+      { id: reference.id },
+    );
     if (!result.issue) throw new TrackerError(`Linear issue "${reference.id}" not found`);
     return this.normalizeIssue(result.issue);
   }
@@ -98,11 +100,14 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
     const linearId = extractLinearId(taskId);
     if (!linearId) return undefined;
     try {
-      const result = await this.graphql<{ issue: LinearIssue }>(`
+      const result = await this.graphql<{ issue: LinearIssue }>(
+        `
         query GetIssue($id: String!) {
           issue(id: $id) { id identifier title description state { name } labels { nodes { name } } createdAt updatedAt url }
         }
-      `, { id: linearId });
+      `,
+        { id: linearId },
+      );
       if (!result.issue) return undefined;
       return this.normalizeIssue(result.issue);
     } catch {
@@ -113,41 +118,50 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
   public async listTasks(projectId: ProjectId): Promise<readonly Task[]> {
     const teamKey = extractTeamKey(projectId) ?? this.config.teamKey;
     if (!teamKey) throw new TrackerError('Linear: teamKey required for listTasks');
-    const result = await this.graphql<{ team: { issues: { nodes: LinearIssue[] } } }>(`
+    const result = await this.graphql<{ team: { issues: { nodes: LinearIssue[] } } }>(
+      `
       query ListIssues($teamKey: String!) {
         team(key: $teamKey) { issues { nodes { id identifier title description state { name } labels { nodes { name } } createdAt updatedAt url } } }
       }
-    `, { teamKey });
+    `,
+      { teamKey },
+    );
     return (result.team?.issues?.nodes ?? []).map((i) => this.normalizeIssue(i));
   }
 
   public async createTask(input: CreateTaskInput): Promise<Task> {
     const teamId = await this.resolveTeamId();
-    const result = await this.graphql<{ issueCreate: { issue: LinearIssue } }>(`
+    const result = await this.graphql<{ issueCreate: { issue: LinearIssue } }>(
+      `
       mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
         issueCreate(input: { teamId: $teamId, title: $title, description: $description }) {
           issue { id identifier title description state { name } createdAt updatedAt url }
         }
       }
-    `, { teamId, title: input.title, description: input.description ?? null });
+    `,
+      { teamId, title: input.title, description: input.description ?? null },
+    );
     return this.normalizeIssue(result.issueCreate.issue);
   }
 
   public async updateTask(taskId: TaskId, update: TrackerTaskUpdate): Promise<Task> {
     const linearId = requireLinearId(taskId);
     const stateId = update.status ? await this.resolveStateId(update.status) : undefined;
-    const result = await this.graphql<{ issueUpdate: { issue: LinearIssue } }>(`
+    const result = await this.graphql<{ issueUpdate: { issue: LinearIssue } }>(
+      `
       mutation UpdateIssue($id: String!, $title: String, $description: String, $stateId: String) {
         issueUpdate(id: $id, input: { title: $title, description: $description, stateId: $stateId }) {
           issue { id identifier title description state { name } createdAt updatedAt url }
         }
       }
-    `, {
-      id: linearId,
-      title: update.title ?? null,
-      description: update.description ?? null,
-      stateId: stateId ?? null,
-    });
+    `,
+      {
+        id: linearId,
+        title: update.title ?? null,
+        description: update.description ?? null,
+        stateId: stateId ?? null,
+      },
+    );
     return this.normalizeIssue(result.issueUpdate.issue);
   }
 
@@ -161,11 +175,14 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
 
   public async addComment(input: CommentInput): Promise<void> {
     const linearId = requireLinearId(input.taskId);
-    await this.graphql(`
+    await this.graphql(
+      `
       mutation AddComment($issueId: String!, $body: String!) {
         commentCreate(input: { issueId: $issueId, body: $body }) { success }
       }
-    `, { issueId: linearId, body: input.body });
+    `,
+      { issueId: linearId, body: input.body },
+    );
   }
 
   public async addDependency(input: AddDependencyInput): Promise<TaskDependency> {
@@ -177,14 +194,22 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
     const fromId = requireLinearId(input.taskId);
     const toId = requireLinearId(input.dependsOnTaskId);
 
-    await this.graphql(`
+    await this.graphql(
+      `
       mutation AddRelation($issueId: String!, $relatedIssueId: String!, $type: IssueRelationType!) {
         issueRelationCreate(input: { issueId: $issueId, relatedIssueId: $relatedIssueId, type: $type }) { success }
       }
-    `, { issueId: fromId, relatedIssueId: toId, type: 'blocked' });
+    `,
+      { issueId: fromId, relatedIssueId: toId, type: 'blocked' },
+    );
 
     const depId = createTaskDependencyId(`${PROVIDER}:${input.taskId}->${input.dependsOnTaskId}`);
-    const dep: TaskDependency = { id: depId, taskId: input.taskId, dependsOnTaskId: input.dependsOnTaskId, kind: input.kind ?? 'blocks' };
+    const dep: TaskDependency = {
+      id: depId,
+      taskId: input.taskId,
+      dependsOnTaskId: input.dependsOnTaskId,
+      kind: input.kind ?? 'blocks',
+    };
     this.dependencies.set(depId, dep);
     if (!this.depsByTask.has(input.taskId)) this.depsByTask.set(input.taskId, new Set());
     this.depsByTask.get(input.taskId)!.add(depId);
@@ -201,7 +226,9 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
 
   public async listDependencies(taskId: TaskId): Promise<readonly TaskDependency[]> {
     const depIds = this.depsByTask.get(taskId) ?? new Set<string>();
-    return [...depIds].map((id) => this.dependencies.get(id)).filter((d): d is TaskDependency => d !== undefined);
+    return [...depIds]
+      .map((id) => this.dependencies.get(id))
+      .filter((d): d is TaskDependency => d !== undefined);
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
@@ -246,9 +273,12 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
 
   private async resolveTeamId(): Promise<string> {
     if (!this.config.teamKey) throw new TrackerError('Linear: teamKey required');
-    const result = await this.graphql<{ team: { id: string } }>(`
+    const result = await this.graphql<{ team: { id: string } }>(
+      `
       query GetTeamId($key: String!) { team(key: $key) { id } }
-    `, { key: this.config.teamKey });
+    `,
+      { key: this.config.teamKey },
+    );
     if (!result.team?.id) throw new TrackerError(`Linear team "${this.config.teamKey}" not found`);
     return result.team.id;
   }
@@ -258,7 +288,10 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
     return undefined;
   }
 
-  private async graphql<T = unknown>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  private async graphql<T = unknown>(
+    query: string,
+    variables?: Record<string, unknown>,
+  ): Promise<T> {
     const response = await fetch(LINEAR_API_URL, {
       method: 'POST',
       headers: {
@@ -270,9 +303,11 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
     if (!response.ok) {
       throw new TrackerError(`Linear API error: ${response.status} ${response.statusText}`);
     }
-    const json = await response.json() as { data?: T; errors?: Array<{ message: string }> };
+    const json = (await response.json()) as { data?: T; errors?: Array<{ message: string }> };
     if (json.errors?.length) {
-      throw new TrackerError(`Linear GraphQL error: ${json.errors.map((e) => e.message).join('; ')}`);
+      throw new TrackerError(
+        `Linear GraphQL error: ${json.errors.map((e) => e.message).join('; ')}`,
+      );
     }
     return json.data as T;
   }

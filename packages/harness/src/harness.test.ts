@@ -5,7 +5,6 @@ import {
   ProfileNotFoundError,
   UnsupportedCapabilityError,
   FakeHarnessRuntime,
-  makeCapabilitySet,
   FULL_CAPABILITIES,
   MINIMAL_CAPABILITIES,
   requireCapability,
@@ -122,7 +121,9 @@ describe('capability negotiation', () => {
   });
 
   it('requireCapability throws when capability is not supported', () => {
-    expect(() => requireCapability(MINIMAL_CAPABILITIES, 'sessions.persistent', 'h')).toThrow(UnsupportedCapabilityError);
+    expect(() => requireCapability(MINIMAL_CAPABILITIES, 'sessions.persistent', 'h')).toThrow(
+      UnsupportedCapabilityError,
+    );
   });
 });
 
@@ -187,7 +188,9 @@ describe('FakeHarnessRuntime', () => {
       profile: { managed: true, id: 'p', kind: 'limited' },
       prompt: 'x',
     });
-    await expect(limited.cancelSession(session.id)).rejects.toBeInstanceOf(UnsupportedCapabilityError);
+    await expect(limited.cancelSession(session.id)).rejects.toBeInstanceOf(
+      UnsupportedCapabilityError,
+    );
   });
 
   it('preserves user-managed profile settings unchanged', () => {

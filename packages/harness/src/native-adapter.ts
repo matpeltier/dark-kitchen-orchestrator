@@ -7,11 +7,10 @@
  */
 
 import { spawn } from 'node:child_process';
-import type { AgentSessionId, RunId, TaskId, WorkspaceId } from '@dark-kitchen/core';
+import type { AgentSessionId } from '@dark-kitchen/core';
 import { createAgentSessionId } from '@dark-kitchen/core';
 import type {
   HarnessEventHandler,
-  HarnessProfile,
   HarnessRuntime,
   HarnessSession,
   StartSessionInput,
@@ -44,7 +43,9 @@ export class NativeHarnessAdapter implements HarnessRuntime {
   }
 
   public async startSession(input: StartSessionInput): Promise<HarnessSession> {
-    const sessionId = createAgentSessionId(`native-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const sessionId = createAgentSessionId(
+      `native-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
     const session: NativeSession = {
       id: sessionId,
       runId: input.runId,
@@ -72,8 +73,12 @@ export class NativeHarnessAdapter implements HarnessRuntime {
     }
 
     let output = '';
-    child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString('utf8'); });
-    child.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString('utf8'); });
+    child.stdout?.on('data', (chunk: Buffer) => {
+      output += chunk.toString('utf8');
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      output += chunk.toString('utf8');
+    });
 
     child.on('close', (code) => {
       session.state = code === 0 ? 'completed' : 'failed';
@@ -93,7 +98,8 @@ export class NativeHarnessAdapter implements HarnessRuntime {
     requireCapability(this.capabilities, 'sessions.live-instructions', this.id);
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
-    const child = (session as NativeSession & { childProcess?: ReturnType<typeof spawn> }).childProcess;
+    const child = (session as NativeSession & { childProcess?: ReturnType<typeof spawn> })
+      .childProcess;
     if (child?.stdin?.writable) {
       child.stdin.write(prompt + '\n', 'utf8');
     }
@@ -103,7 +109,8 @@ export class NativeHarnessAdapter implements HarnessRuntime {
     requireCapability(this.capabilities, 'sessions.cancel', this.id);
     const session = this.sessions.get(sessionId);
     if (!session) return;
-    const child = (session as NativeSession & { childProcess?: ReturnType<typeof spawn> }).childProcess;
+    const child = (session as NativeSession & { childProcess?: ReturnType<typeof spawn> })
+      .childProcess;
     child?.kill('SIGTERM');
     session.state = 'cancelled';
     this.emit(sessionId, { sessionId, state: 'cancelled' });
@@ -119,7 +126,8 @@ export class NativeHarnessAdapter implements HarnessRuntime {
   public async stopSession(sessionId: AgentSessionId): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
-    const child = (session as NativeSession & { childProcess?: ReturnType<typeof spawn> }).childProcess;
+    const child = (session as NativeSession & { childProcess?: ReturnType<typeof spawn> })
+      .childProcess;
     child?.kill('SIGKILL');
     session.state = 'cancelled';
   }
@@ -134,7 +142,9 @@ export class NativeHarnessAdapter implements HarnessRuntime {
       this.subscribers.set(sessionId, new Set());
     }
     this.subscribers.get(sessionId)!.add(handler);
-    return () => { this.subscribers.get(sessionId)?.delete(handler); };
+    return () => {
+      this.subscribers.get(sessionId)?.delete(handler);
+    };
   }
 
   private emit(sessionId: AgentSessionId, event: Parameters<HarnessEventHandler>[0]): void {

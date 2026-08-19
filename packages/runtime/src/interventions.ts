@@ -16,10 +16,7 @@ import type {
   RuntimeStore,
   TaskId,
 } from '@dark-kitchen/core';
-import {
-  createEventId,
-  createInterventionId,
-} from '@dark-kitchen/core';
+import { createEventId, createInterventionId } from '@dark-kitchen/core';
 
 export type InterventionScope = Intervention['scope'];
 export type { InterventionKind };
@@ -33,12 +30,7 @@ export interface CreateInterventionInput {
   readonly deduplicationKey?: string;
 }
 
-export type ResolutionAction =
-  | 'retry'
-  | 'switch-harness'
-  | 'approve'
-  | 'stop'
-  | 'free-text';
+export type ResolutionAction = 'retry' | 'switch-harness' | 'approve' | 'stop' | 'free-text';
 
 export interface ResolveInterventionInput {
   readonly interventionId: InterventionId;
@@ -115,7 +107,11 @@ export class InterventionService {
     } else if (input.scope === 'run') {
       intervention = { ...base, scope: 'run' as const, targetId: input.targetId as RunId };
     } else {
-      intervention = { ...base, scope: 'agent' as const, targetId: input.targetId as AgentSessionId };
+      intervention = {
+        ...base,
+        scope: 'agent' as const,
+        targetId: input.targetId as AgentSessionId,
+      };
     }
 
     await this.store.saveIntervention(intervention);
@@ -164,7 +160,11 @@ export class InterventionService {
       id: createEventId(`evt-${Date.now()}`),
       type: 'intervention.resolved',
       occurredAt: now,
-      payload: { interventionId: input.interventionId, kind: intervention.kind, scope: intervention.scope },
+      payload: {
+        interventionId: input.interventionId,
+        kind: intervention.kind,
+        scope: intervention.scope,
+      },
     });
 
     return resolved;

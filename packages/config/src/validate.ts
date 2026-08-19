@@ -38,7 +38,11 @@ function detectInlineSecrets(config: DarkKitchenConfig): string[] {
   return findings;
 }
 
-function collectDuplicates<T>(items: T[] | undefined, key: (item: T) => string, label: string): string[] {
+function collectDuplicates<T>(
+  items: T[] | undefined,
+  key: (item: T) => string,
+  label: string,
+): string[] {
   if (!items) return [];
   const seen = new Set<string>();
   const dupes: string[] = [];
@@ -65,7 +69,9 @@ function validateReferences(config: DarkKitchenConfig): string[] {
   // Roles must reference existing harness profiles
   for (const role of config.roles ?? []) {
     if (!harnessProfileIds.has(role.harnessProfileId)) {
-      errors.push(`Role "${role.id}" references unknown harnessProfileId "${role.harnessProfileId}"`);
+      errors.push(
+        `Role "${role.id}" references unknown harnessProfileId "${role.harnessProfileId}"`,
+      );
     }
     // Overrides are only meaningful for managed harness profiles
     if (role.overrides) {
@@ -132,9 +138,7 @@ export function validateConfig(raw: unknown): DarkKitchenConfig {
     parsed = DarkKitchenConfigSchema.parse(raw);
   } catch (err) {
     if (err instanceof ZodError) {
-      const issues = err.issues.map(
-        (i) => `${i.path.join('.') || '<root>'}: ${i.message}`,
-      );
+      const issues = err.issues.map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`);
       throw new ConfigValidationError(
         `Config schema validation failed:\n${issues.join('\n')}`,
         issues,

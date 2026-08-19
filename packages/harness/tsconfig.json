@@ -8,8 +8,5 @@
     "rootDir": "src"
   },
   "include": ["src/**/*.ts"],
-  "references": [
-    { "path": "../core" },
-    { "path": "../process-execution" }
-  ]
+  "references": [{ "path": "../core" }, { "path": "../process-execution" }]
 }

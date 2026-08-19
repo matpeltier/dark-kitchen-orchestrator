@@ -12,11 +12,10 @@
  */
 
 import { spawn } from 'node:child_process';
-import type { AgentSessionId, RunId, TaskId, WorkspaceId } from '@dark-kitchen/core';
+import type { AgentSessionId } from '@dark-kitchen/core';
 import { createAgentSessionId } from '@dark-kitchen/core';
 import type {
   HarnessEventHandler,
-  HarnessProfile,
   HarnessRuntime,
   HarnessSession,
   StartSessionInput,
@@ -106,9 +105,12 @@ export class AcpHarnessAdapter implements HarnessRuntime {
 
     // Build control args (bounded metadata only)
     const controlArgs = [
-      '--profile', this.config.profile,
-      '--session-id', sessionId,
-      '--output-format', 'ndjson',
+      '--profile',
+      this.config.profile,
+      '--session-id',
+      sessionId,
+      '--output-format',
+      'ndjson',
       ...(input.model ? ['--model', input.model] : []),
       ...(this.config.extraArgs ?? []),
     ];
@@ -143,7 +145,9 @@ export class AcpHarnessAdapter implements HarnessRuntime {
         this.emit(sessionId, {
           sessionId,
           state: session.state,
-          ...(code !== 0 ? { error: new Error(`ACP process exited with code ${code ?? 'null'}`) } : {}),
+          ...(code !== 0
+            ? { error: new Error(`ACP process exited with code ${code ?? 'null'}`) }
+            : {}),
         });
       }
     });
@@ -172,7 +176,8 @@ export class AcpHarnessAdapter implements HarnessRuntime {
   public async sendPrompt(sessionId: AgentSessionId, prompt: string): Promise<void> {
     requireCapability(this.capabilities, 'sessions.live-instructions', this.id);
     const session = this.getSessionState(sessionId);
-    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> }).childProcess;
+    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> })
+      .childProcess;
     if (child?.stdin?.writable) {
       // Payload goes through stdin, not args
       child.stdin.write(prompt + '\n', 'utf8');
@@ -182,7 +187,8 @@ export class AcpHarnessAdapter implements HarnessRuntime {
   public async cancelSession(sessionId: AgentSessionId): Promise<void> {
     requireCapability(this.capabilities, 'sessions.cancel', this.id);
     const session = this.getSessionState(sessionId);
-    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> }).childProcess;
+    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> })
+      .childProcess;
     child?.kill('SIGTERM');
     session.state = 'cancelled';
     this.emit(sessionId, { sessionId, state: 'cancelled' });
@@ -203,7 +209,8 @@ export class AcpHarnessAdapter implements HarnessRuntime {
   public async stopSession(sessionId: AgentSessionId): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
-    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> }).childProcess;
+    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> })
+      .childProcess;
     child?.kill('SIGKILL');
     session.state = 'cancelled';
   }
@@ -213,14 +220,17 @@ export class AcpHarnessAdapter implements HarnessRuntime {
     if (!s) return undefined;
     const meta = this.metadata.get(sessionId);
     const result: HarnessSession = { ...s };
-    if (meta?.externalSessionId) Object.assign(result, { externalSessionId: meta.externalSessionId });
+    if (meta?.externalSessionId)
+      Object.assign(result, { externalSessionId: meta.externalSessionId });
     return result;
   }
 
   public subscribe(sessionId: AgentSessionId, handler: HarnessEventHandler): () => void {
     if (!this.subscribers.has(sessionId)) this.subscribers.set(sessionId, new Set());
     this.subscribers.get(sessionId)!.add(handler);
-    return () => { this.subscribers.get(sessionId)?.delete(handler); };
+    return () => {
+      this.subscribers.get(sessionId)?.delete(handler);
+    };
   }
 
   public getSavedMetadata(sessionId: AgentSessionId): AcpSessionMetadata | undefined {
@@ -277,13 +287,21 @@ export class AcpHarnessAdapter implements HarnessRuntime {
         break;
       case 'session.error':
         session.state = 'failed';
-        this.emit(sessionId, { sessionId, state: 'failed', error: new Error(event.message ?? 'ACP session error') });
+        this.emit(sessionId, {
+          sessionId,
+          state: 'failed',
+          error: new Error(event.message ?? 'ACP session error'),
+        });
         break;
       case 'auth.error':
       case 'quota.error':
       case 'rate-limit':
         session.state = 'failed';
-        this.emit(sessionId, { sessionId, state: 'failed', error: new AcpOperationalError(event.type, event.message ?? event.type) });
+        this.emit(sessionId, {
+          sessionId,
+          state: 'failed',
+          error: new AcpOperationalError(event.type, event.message ?? event.type),
+        });
         break;
     }
   }

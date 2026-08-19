@@ -15,12 +15,7 @@
 import type { FullTrackerAdapter } from '@dark-kitchen/tracker';
 import type { DarkKitchenConfig } from '@dark-kitchen/config';
 import type { InterventionService } from '@dark-kitchen/runtime';
-import { isOperationalIntervention } from '@dark-kitchen/runtime';
-import {
-  createProjectId,
-  createTaskId,
-  createInterventionId,
-} from '@dark-kitchen/core';
+import { createProjectId, createTaskId, createInterventionId } from '@dark-kitchen/core';
 
 // ─── Tool descriptors ─────────────────────────────────────────────────────────
 
@@ -73,7 +68,10 @@ export const TRACKER_TOOLS: McpToolDescriptor[] = [
         taskId: { type: 'string' },
         title: { type: 'string' },
         description: { type: 'string' },
-        status: { type: 'string', enum: ['backlog', 'ready', 'active', 'blocked', 'completed', 'cancelled'] },
+        status: {
+          type: 'string',
+          enum: ['backlog', 'ready', 'active', 'blocked', 'completed', 'cancelled'],
+        },
       },
       required: ['taskId'],
     },
@@ -81,7 +79,11 @@ export const TRACKER_TOOLS: McpToolDescriptor[] = [
   {
     name: 'dk_close_task',
     description: 'Close/complete a task.',
-    inputSchema: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] },
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: { type: 'string' } },
+      required: ['taskId'],
+    },
   },
   {
     name: 'dk_add_comment',
@@ -110,12 +112,20 @@ export const TRACKER_TOOLS: McpToolDescriptor[] = [
   {
     name: 'dk_remove_dependency',
     description: 'Remove a blocker dependency by dependency ID.',
-    inputSchema: { type: 'object', properties: { dependencyId: { type: 'string' } }, required: ['dependencyId'] },
+    inputSchema: {
+      type: 'object',
+      properties: { dependencyId: { type: 'string' } },
+      required: ['dependencyId'],
+    },
   },
   {
     name: 'dk_list_dependencies',
     description: 'List blocker dependencies for a task.',
-    inputSchema: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] },
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: { type: 'string' } },
+      required: ['taskId'],
+    },
   },
 ];
 
@@ -154,7 +164,11 @@ export const RUNTIME_TOOLS: McpToolDescriptor[] = [
   {
     name: 'dk_get_intervention',
     description: 'Get a specific intervention by ID.',
-    inputSchema: { type: 'object', properties: { interventionId: { type: 'string' } }, required: ['interventionId'] },
+    inputSchema: {
+      type: 'object',
+      properties: { interventionId: { type: 'string' } },
+      required: ['interventionId'],
+    },
   },
   {
     name: 'dk_resolve_intervention',
@@ -163,7 +177,10 @@ export const RUNTIME_TOOLS: McpToolDescriptor[] = [
       type: 'object',
       properties: {
         interventionId: { type: 'string' },
-        action: { type: 'string', enum: ['retry', 'switch-harness', 'approve', 'stop', 'free-text'] },
+        action: {
+          type: 'string',
+          enum: ['retry', 'switch-harness', 'approve', 'stop', 'free-text'],
+        },
         answer: { type: 'string' },
       },
       required: ['interventionId', 'action'],
@@ -172,7 +189,11 @@ export const RUNTIME_TOOLS: McpToolDescriptor[] = [
   {
     name: 'dk_dismiss_intervention',
     description: 'Dismiss a non-critical intervention.',
-    inputSchema: { type: 'object', properties: { interventionId: { type: 'string' } }, required: ['interventionId'] },
+    inputSchema: {
+      type: 'object',
+      properties: { interventionId: { type: 'string' } },
+      required: ['interventionId'],
+    },
   },
 ];
 
@@ -185,7 +206,11 @@ export const CAPABILITY_TOOLS: McpToolDescriptor[] = [
   {
     name: 'dk_inspect_capability',
     description: 'Inspect the state of a specific capability provider.',
-    inputSchema: { type: 'object', properties: { capabilityId: { type: 'string' } }, required: ['capabilityId'] },
+    inputSchema: {
+      type: 'object',
+      properties: { capabilityId: { type: 'string' } },
+      required: ['capabilityId'],
+    },
   },
   {
     name: 'dk_request_capability_provisioning',
@@ -203,12 +228,7 @@ export const CAPABILITY_TOOLS: McpToolDescriptor[] = [
   },
 ];
 
-export const ALL_TOOLS = [
-  ...TRACKER_TOOLS,
-  ...CONFIG_TOOLS,
-  ...RUNTIME_TOOLS,
-  ...CAPABILITY_TOOLS,
-];
+export const ALL_TOOLS = [...TRACKER_TOOLS, ...CONFIG_TOOLS, ...RUNTIME_TOOLS, ...CAPABILITY_TOOLS];
 
 // ─── Tool handler ─────────────────────────────────────────────────────────────
 
@@ -250,7 +270,8 @@ export async function handleTool(
           projectId: createProjectId(String(args['projectId'])),
           title: String(args['title']),
         };
-        if (args['description'] !== undefined) Object.assign(createInput, { description: String(args['description']) });
+        if (args['description'] !== undefined)
+          Object.assign(createInput, { description: String(args['description']) });
         const task = await ctx.tracker.createTask(createInput);
         return ok(task);
       }
@@ -258,10 +279,16 @@ export async function handleTool(
       case 'dk_update_task': {
         if (!ctx.tracker) return err('No tracker configured');
         const updateInput: Parameters<typeof ctx.tracker.updateTask>[1] = {};
-        if (args['title'] !== undefined) Object.assign(updateInput, { title: String(args['title']) });
-        if (args['description'] !== undefined) Object.assign(updateInput, { description: String(args['description']) });
-        if (args['status'] !== undefined) Object.assign(updateInput, { status: args['status'] as never });
-        const task = await ctx.tracker.updateTask(createTaskId(String(args['taskId'])), updateInput);
+        if (args['title'] !== undefined)
+          Object.assign(updateInput, { title: String(args['title']) });
+        if (args['description'] !== undefined)
+          Object.assign(updateInput, { description: String(args['description']) });
+        if (args['status'] !== undefined)
+          Object.assign(updateInput, { status: args['status'] as never });
+        const task = await ctx.tracker.updateTask(
+          createTaskId(String(args['taskId'])),
+          updateInput,
+        );
         return ok(task);
       }
 
@@ -332,7 +359,8 @@ export async function handleTool(
           interventionId: createInterventionId(String(args['interventionId'])),
           action: args['action'] as never,
         };
-        if (args['answer'] !== undefined) Object.assign(resolveInput, { answer: String(args['answer']) });
+        if (args['answer'] !== undefined)
+          Object.assign(resolveInput, { answer: String(args['answer']) });
         const resolved = await ctx.interventionService.resolve(resolveInput);
         return ok(resolved);
       }
@@ -374,7 +402,10 @@ export async function handleTool(
           approved: args['approve'] === true,
         };
         if (!plan.approved) {
-          return ok({ plan, message: 'Review the plan and call again with approve:true to execute.' });
+          return ok({
+            plan,
+            message: 'Review the plan and call again with approve:true to execute.',
+          });
         }
         // In production, this would trigger the actual installation through DK services.
         return ok({ plan, executed: true, message: 'Provisioning queued.' });

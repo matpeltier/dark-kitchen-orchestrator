@@ -56,7 +56,10 @@ export interface FullTrackerAdapter {
 }
 
 export class TrackerError extends Error {
-  public constructor(message: string, public readonly trackerCause?: unknown) {
+  public constructor(
+    message: string,
+    public readonly trackerCause?: unknown,
+  ) {
     super(message);
     this.name = 'TrackerError';
   }

@@ -25,10 +25,7 @@ export interface AgentCallOutput {
 }
 
 /** A harness runner receives an agent call and returns a result. */
-export type HarnessRunner = (
-  input: AgentCallInput,
-  signal: AbortSignal,
-) => Promise<unknown>;
+export type HarnessRunner = (input: AgentCallInput, signal: AbortSignal) => Promise<unknown>;
 
 /** Resolves a role name to a HarnessRunner. */
 export type RoleResolver = (role: AgentRole) => HarnessRunner;

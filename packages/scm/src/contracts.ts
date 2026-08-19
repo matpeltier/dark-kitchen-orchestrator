@@ -1,10 +1,7 @@
 import type {
   Check,
-  CheckId,
-  CheckStatus,
   PullRequest,
   PullRequestId,
-  PullRequestStatus,
   Repository,
   RepositoryId,
   ScmReference,
@@ -58,7 +55,10 @@ export interface FullScmAdapter {
   pushBranch(input: PushBranchInput): Promise<void>;
   createPullRequest(input: CreatePullRequestInput): Promise<PullRequest>;
   getPullRequest(repositoryId: RepositoryId, pullRequestId: PullRequestId): Promise<PullRequest>;
-  findPullRequestByBranch(repositoryId: RepositoryId, sourceBranch: string): Promise<PullRequest | undefined>;
+  findPullRequestByBranch(
+    repositoryId: RepositoryId,
+    sourceBranch: string,
+  ): Promise<PullRequest | undefined>;
   listChecks(pullRequestId: PullRequestId): Promise<readonly Check[]>;
   pollChecks(pullRequestId: PullRequestId, policy: CheckPollPolicy): Promise<readonly Check[]>;
   merge(input: MergePullRequestInput): Promise<PullRequest>;
@@ -66,7 +66,10 @@ export interface FullScmAdapter {
 }
 
 export class ScmError extends Error {
-  public constructor(message: string, public readonly scmCause?: unknown) {
+  public constructor(
+    message: string,
+    public readonly scmCause?: unknown,
+  ) {
     super(message);
     this.name = 'ScmError';
   }

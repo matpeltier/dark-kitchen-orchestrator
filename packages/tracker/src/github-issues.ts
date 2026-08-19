@@ -16,11 +16,7 @@ import type {
   TaskDependencyId,
   TrackerReference,
 } from '@dark-kitchen/core';
-import {
-  createProjectId,
-  createTaskId,
-  createTaskDependencyId,
-} from '@dark-kitchen/core';
+import { createProjectId, createTaskId, createTaskDependencyId } from '@dark-kitchen/core';
 import type {
   AddDependencyInput,
   CommentInput,
@@ -122,7 +118,8 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
 
   public async updateTask(taskId: TaskId, update: TrackerTaskUpdate): Promise<Task> {
     const issueNumber = requireIssueNumber(taskId);
-    const state = update.status === 'completed' || update.status === 'cancelled' ? 'closed' : 'open';
+    const state =
+      update.status === 'completed' || update.status === 'cancelled' ? 'closed' : 'open';
     const { data } = await this.octokit.issues.update({
       owner: this.config.owner,
       repo: this.config.repo,
@@ -174,9 +171,7 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
       throw new CyclicDependencyError(input.taskId, input.dependsOnTaskId);
     }
 
-    const depId = createTaskDependencyId(
-      `${PROVIDER}:${input.taskId}->${input.dependsOnTaskId}`,
-    );
+    const depId = createTaskDependencyId(`${PROVIDER}:${input.taskId}->${input.dependsOnTaskId}`);
 
     // Use GitHub's native sub-issues API when available, or add a body comment.
     // Native "blocked by" relationship via GitHub's issue link API.
@@ -216,7 +211,9 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
   // ─── Private helpers ───────────────────────────────────────────────────────
 
   private normalizeIssue(issue: GitHubIssue): Task {
-    const taskId = createTaskId(`${PROVIDER}:${this.config.owner}/${this.config.repo}#${issue.number}`);
+    const taskId = createTaskId(
+      `${PROVIDER}:${this.config.owner}/${this.config.repo}#${issue.number}`,
+    );
     const projectId = createProjectId(`${PROVIDER}:${this.config.owner}/${this.config.repo}`);
     const status = this.resolveStatus(issue);
 
@@ -238,9 +235,7 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
 
   private resolveStatus(issue: GitHubIssue): Task['status'] {
     if (issue.state === 'closed') return 'completed';
-    const labels = (issue.labels ?? []).map((l) =>
-      typeof l === 'string' ? l : l.name ?? '',
-    );
+    const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
     const dkLabel = labels.find((l) => l.startsWith(this.labelPrefix));
     if (dkLabel) {
       const state = dkLabel.slice(this.labelPrefix.length);
@@ -259,7 +254,10 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
     return graph;
   }
 
-  private async addGitHubBlockingRelationship(taskId: TaskId, dependsOnTaskId: TaskId): Promise<void> {
+  private async addGitHubBlockingRelationship(
+    taskId: TaskId,
+    dependsOnTaskId: TaskId,
+  ): Promise<void> {
     // GitHub's native issue relations API (beta) — add a "blocked by" relationship.
     // Falls back gracefully if the API is unavailable.
     try {
@@ -268,27 +266,32 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
       if (blockerNumber === null || blockedNumber === null) return;
 
       // Use GraphQL sub-issues API (GitHub Projects v2 / issue relations)
-      await this.octokit.graphql(
-        `mutation AddIssueRelation($subjectId: ID!, $objectId: ID!, $relationType: IssueRelationType!) {
+      await this.octokit
+        .graphql(
+          `mutation AddIssueRelation($subjectId: ID!, $objectId: ID!, $relationType: IssueRelationType!) {
           addSubIssue(input: { issueId: $subjectId, subIssueId: $objectId }) {
             issue { id }
           }
         }`,
-        {
-          // These are placeholder variables; in production, use actual node IDs.
-          subjectId: blockedNumber,
-          objectId: blockerNumber,
-          relationType: 'BLOCKED_BY',
-        },
-      ).catch(() => {
-        // Sub-issues API may not be available; dependency is stored locally.
-      });
+          {
+            // These are placeholder variables; in production, use actual node IDs.
+            subjectId: blockedNumber,
+            objectId: blockerNumber,
+            relationType: 'BLOCKED_BY',
+          },
+        )
+        .catch(() => {
+          // Sub-issues API may not be available; dependency is stored locally.
+        });
     } catch {
       // API not available — local storage only
     }
   }
 
-  private async removeGitHubBlockingRelationship(_taskId: TaskId, _dependsOnTaskId: TaskId): Promise<void> {
+  private async removeGitHubBlockingRelationship(
+    _taskId: TaskId,
+    _dependsOnTaskId: TaskId,
+  ): Promise<void> {
     // Symmetric removal via GraphQL — best-effort
   }
 }
@@ -420,7 +423,13 @@ export class MockTrackerAdapter implements FullTrackerAdapter {
 
   public async addDependency(input: AddDependencyInput): Promise<TaskDependency> {
     const graph = this.buildDependencyGraph();
-    if (wouldCreateCycle(graph as ReadonlyMap<TaskId, ReadonlySet<TaskId>>, input.taskId, input.dependsOnTaskId)) {
+    if (
+      wouldCreateCycle(
+        graph as ReadonlyMap<TaskId, ReadonlySet<TaskId>>,
+        input.taskId,
+        input.dependsOnTaskId,
+      )
+    ) {
       throw new CyclicDependencyError(input.taskId, input.dependsOnTaskId);
     }
 

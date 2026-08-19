@@ -13,7 +13,6 @@
 import type {
   AgentCallOutput,
   AgentStepOptions,
-  HarnessRunner,
   JournalStore,
   ParallelOptions,
   ProgressEvent,
@@ -21,9 +20,7 @@ import type {
   RoleResolver,
   WorkflowContext,
   WorkflowStepOptions,
-  WorkflowStepResult,
 } from './types.js';
-import { CANCELLED } from './types.js';
 import { buildCallKey, childKeyContext, rootKeyContext, type KeyContext } from './keys.js';
 
 export class WorkflowCancelledError extends Error {
@@ -69,10 +66,7 @@ export interface RunWorkflowOptions {
  * Execute a workflow function. Returns the workflow's return value.
  * Throws `WorkflowCancelledError` if the signal fires.
  */
-export async function runWorkflow<T>(
-  fn: WorkflowFn<T>,
-  options: RunWorkflowOptions,
-): Promise<T> {
+export async function runWorkflow<T>(fn: WorkflowFn<T>, options: RunWorkflowOptions): Promise<T> {
   const controller = new AbortController();
   const combinedSignal = options.signal
     ? combineSignals(options.signal, controller.signal)
@@ -96,11 +90,9 @@ export async function runWorkflow<T>(
       reject(new WorkflowCancelledError());
       return;
     }
-    combinedSignal.addEventListener(
-      'abort',
-      () => reject(new WorkflowCancelledError()),
-      { once: true },
-    );
+    combinedSignal.addEventListener('abort', () => reject(new WorkflowCancelledError()), {
+      once: true,
+    });
   });
 
   try {
@@ -204,7 +196,11 @@ export class WorkflowBuilder {
    * Repeated calls to the same child workflow (e.g. in a loop) get distinct
    * stable keys based on their logical call position.
    */
-  public async workflow<T>(name: string, fn: WorkflowFn<T>, options?: WorkflowStepOptions): Promise<T> {
+  public async workflow<T>(
+    name: string,
+    fn: WorkflowFn<T>,
+    options?: WorkflowStepOptions,
+  ): Promise<T> {
     if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
     const callKey = this.nextKey(`workflow:${name}`);
     const childKeyCtx = childKeyContext(this.keyCtx, callKey);
@@ -213,11 +209,7 @@ export class WorkflowBuilder {
     // Check cancellation again after any async readiness boundary
     if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
 
-    return this.withRetry(
-      callKey,
-      () => fn(childBuilder),
-      options?.retryPolicy,
-    );
+    return this.withRetry(callKey, () => fn(childBuilder), options?.retryPolicy);
   }
 
   /**
@@ -238,10 +230,7 @@ export class WorkflowBuilder {
     return buildCallKey(this.keyCtx, uniqueLocal);
   }
 
-  private async runAgentStep(
-    options: AgentStepOptions,
-    callKey: string,
-  ): Promise<AgentCallOutput> {
+  private async runAgentStep(options: AgentStepOptions, callKey: string): Promise<AgentCallOutput> {
     // Replay from journal if available
     const cached = await this.ctx.journal.get(callKey);
     if (cached !== undefined) {
@@ -258,13 +247,11 @@ export class WorkflowBuilder {
 
         let result: unknown;
         try {
-          const callInput = options.context !== undefined
-            ? { role: options.role, prompt: options.prompt, context: options.context }
-            : { role: options.role, prompt: options.prompt };
-          result = await raceWithSignal(
-            runner(callInput, this.ctx.signal),
-            this.ctx.signal,
-          );
+          const callInput =
+            options.context !== undefined
+              ? { role: options.role, prompt: options.prompt, context: options.context }
+              : { role: options.role, prompt: options.prompt };
+          result = await raceWithSignal(runner(callInput, this.ctx.signal), this.ctx.signal);
         } catch (err) {
           if (this.ctx.signal.aborted || err instanceof WorkflowCancelledError) {
             throw new WorkflowCancelledError();
@@ -332,16 +319,32 @@ async function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Prom
     const onAbort = () => reject(new WorkflowCancelledError());
     signal.addEventListener('abort', onAbort, { once: true });
     promise.then(
-      (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
-      (e) => { signal.removeEventListener('abort', onAbort); reject(e as unknown); },
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(e as unknown);
+      },
     );
   });
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(new WorkflowCancelledError()); return; }
+    if (signal.aborted) {
+      reject(new WorkflowCancelledError());
+      return;
+    }
     const timer = setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => { clearTimeout(timer); reject(new WorkflowCancelledError()); }, { once: true });
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(new WorkflowCancelledError());
+      },
+      { once: true },
+    );
   });
 }

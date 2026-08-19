@@ -86,8 +86,10 @@ export class RoleRouter {
 
     const resolved: ResolvedRole = { roleId, profile };
     if (roleDef.modelOverride) Object.assign(resolved, { modelOverride: roleDef.modelOverride });
-    if (roleDef.reasoningOverride) Object.assign(resolved, { reasoningOverride: roleDef.reasoningOverride });
-    if (roleDef.instructionsOverride) Object.assign(resolved, { instructionsOverride: roleDef.instructionsOverride });
+    if (roleDef.reasoningOverride)
+      Object.assign(resolved, { reasoningOverride: roleDef.reasoningOverride });
+    if (roleDef.instructionsOverride)
+      Object.assign(resolved, { instructionsOverride: roleDef.instructionsOverride });
     return resolved;
   }
 

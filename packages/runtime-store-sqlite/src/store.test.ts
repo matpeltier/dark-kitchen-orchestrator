@@ -3,19 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { SqliteRuntimeStore } from './store.js';
-import type {
-  Project,
-  Task,
-  Run,
-  AgentSession,
-  Workspace,
-  Intervention,
-} from '@dark-kitchen/core';
+import type { Project, Task, Run, Workspace, Intervention } from '@dark-kitchen/core';
 import {
   createProjectId,
   createTaskId,
   createRunId,
-  createAgentSessionId,
   createWorkspaceId,
   createInterventionId,
   createRepositoryId,
@@ -23,8 +15,9 @@ import {
   createEventId,
 } from '@dark-kitchen/core';
 
-function now() { return new Date().toISOString(); }
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
+function now() {
+  return new Date().toISOString();
+}
 
 describe('SqliteRuntimeStore - migrations', () => {
   it('opens an empty database and applies all migrations', async () => {
@@ -308,14 +301,17 @@ describe('SqliteRuntimeStore - concurrent writes', () => {
     };
     await store.saveProject(project);
 
-    const tasks = Array.from({ length: 20 }, (_, i): Task => ({
-      id: createTaskId(`task-conc-${i}`),
-      projectId: project.id,
-      title: `Task ${i}`,
-      status: 'backlog',
-      createdAt: now(),
-      updatedAt: now(),
-    }));
+    const tasks = Array.from(
+      { length: 20 },
+      (_, i): Task => ({
+        id: createTaskId(`task-conc-${i}`),
+        projectId: project.id,
+        title: `Task ${i}`,
+        status: 'backlog',
+        createdAt: now(),
+        updatedAt: now(),
+      }),
+    );
 
     await Promise.all(tasks.map((t) => store.saveTask(t)));
 

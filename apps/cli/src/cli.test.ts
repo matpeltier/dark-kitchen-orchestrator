@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DarkKitchenDaemon } from './daemon.js';
 import { runDoctor } from './doctor.js';

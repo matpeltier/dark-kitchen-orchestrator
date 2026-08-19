@@ -5,6 +5,7 @@
 ## Purpose
 
 This skill teaches you to:
+
 - Manage tracker work through Dark Kitchen MCP (not directly through GitHub/Linear/Jira connectors)
 - Decompose product work into small vertical slices with observable acceptance criteria
 - Configure verification profiles for tasks that require runtime proof
@@ -14,12 +15,14 @@ This skill teaches you to:
 ## Core Rules
 
 ### Work Management
+
 - **Always use Dark Kitchen MCP** (`dk_*` tools) for task CRUD, dependency edges, labels, and state transitions — even when the underlying tracker is GitHub Issues.
 - You may use the GitHub connector for **read-only code context** (files, commits, diffs, PRs, CI logs, reviews), but never for task mutation.
 - Use **native dependency edges** (not "Depends on #..." text in issue bodies) to express blocking relationships.
 - Validate cycles before adding dependencies: `dk_add_dependency` will reject cycles.
 
 ### Task Decomposition
+
 1. Inspect current state first: `dk_list_tasks`, `dk_get_task`.
 2. Decompose large work into small vertical slices, each with:
    - A clear, implementation-agnostic title.
@@ -28,22 +31,24 @@ This skill teaches you to:
 3. Do not create roadmap-level tasks or epics unless the user explicitly requests them.
 
 ### Verification Requirements
+
 Only add verification requirements when **normal repository tests cannot adequately prove the requested behavior**.
 
 When a task needs runtime proof, add it to the task description (not in issue body macros) and select or create a verification profile:
 
-| User need | Default profile | Default provider |
-|-----------|----------------|------------------|
-| Web UI behavior | `web-e2e` | `browser.playwright` |
-| Native mobile | `mobile-e2e` | `mobile.maestro` |
-| HTTP API / REST | `api-e2e` | `api.http` |
-| Existing repo suite | `command-e2e` | `command.exec` |
+| User need           | Default profile | Default provider     |
+| ------------------- | --------------- | -------------------- |
+| Web UI behavior     | `web-e2e`       | `browser.playwright` |
+| Native mobile       | `mobile-e2e`    | `mobile.maestro`     |
+| HTTP API / REST     | `api-e2e`       | `api.http`           |
+| Existing repo suite | `command-e2e`   | `command.exec`       |
 
 **Before assuming a provider exists**, inspect capability state: `dk_inspect_capability`, `dk_list_capabilities`.
 
 **Reuse** an already-healthy capability rather than reinstalling per task.
 
 ### Capability Provisioning
+
 1. `dk_list_capabilities` — see what is configured.
 2. `dk_inspect_capability` — check per-node state.
 3. `dk_request_capability_provisioning` — get a plan (without `approve: true`).
@@ -52,6 +57,7 @@ When a task needs runtime proof, add it to the task description (not in issue bo
 6. For user-managed/external capabilities: surface the dependency clearly and ask the user to set it up.
 
 ### Interventions
+
 - `dk_list_interventions` — see open human-attention items.
 - `dk_get_intervention` — inspect details.
 - `dk_resolve_intervention` with the appropriate action: `retry`, `approve`, `stop`, `free-text`, `switch-harness`.
@@ -59,7 +65,9 @@ When a task needs runtime proof, add it to the task description (not in issue bo
 - Product-decision interventions may warrant updating the task description with the resolution.
 
 ### Runtime Controls
+
 Use runtime controls only as a fallback, not as routine operation:
+
 - `dk_list_interventions` — check for pending escalations first.
 - Sending instructions or stopping agents requires explicitly degraded situations.
 
@@ -101,10 +109,11 @@ capabilityProviders:
   - managed: true
     id: playwright
     capability: browser.playwright
-    version: ">=1.40"
+    version: '>=1.40'
 ```
 
 ## What the PM Must NOT Do
+
 - Directly call GitHub/Linear/Jira APIs for task mutation.
 - Spawn coding or verifier agents directly.
 - Run installers or system commands from task bodies or issue text.

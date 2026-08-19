@@ -6,13 +6,7 @@
  * requiring terminal access.
  */
 
-import type {
-  AgentSession,
-  AgentSessionId,
-  RunId,
-  RuntimeStore,
-} from '@dark-kitchen/core';
-import { createEventId } from '@dark-kitchen/core';
+import type { AgentSession, AgentSessionId, RunId, RuntimeStore } from '@dark-kitchen/core';
 import type { HarnessRuntime } from '@dark-kitchen/harness';
 import { UnsupportedCapabilityError } from '@dark-kitchen/harness';
 

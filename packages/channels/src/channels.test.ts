@@ -1,9 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  ChannelGateway,
-  FakeChannelTransport,
-  OpenClawTransport,
-} from './index.js';
+import { ChannelGateway, FakeChannelTransport } from './index.js';
 import { createChannelMessageId, createInterventionId } from '@dark-kitchen/core';
 
 describe('ChannelGateway', () => {
@@ -61,7 +57,9 @@ describe('ChannelGateway', () => {
     gateway.addTransport(transport);
 
     const replies: string[] = [];
-    gateway.onInterventionReply((_, reply) => { replies.push(reply.body); });
+    gateway.onInterventionReply((_, reply) => {
+      replies.push(reply.body);
+    });
 
     await transport.receiveMessage({
       id: createChannelMessageId('msg-x'),
@@ -81,7 +79,9 @@ describe('ChannelGateway', () => {
 
     const interventionId = createInterventionId('int-dedup');
     const replies: string[] = [];
-    gateway.onInterventionReply((_, reply) => { replies.push(reply.body); });
+    gateway.onInterventionReply((_, reply) => {
+      replies.push(reply.body);
+    });
 
     await gateway.notify({
       address: { channel: 'dedup-ch', conversationId: 'conv-dedup' },

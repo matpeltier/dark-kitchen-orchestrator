@@ -3,8 +3,6 @@ import { dirname } from 'node:path';
 import type {
   AgentSession,
   AgentSessionId,
-  Check,
-  CheckId,
   Configuration,
   ConfigurationId,
   DomainEvent,
@@ -15,9 +13,6 @@ import type {
   InterventionId,
   Project,
   ProjectId,
-  PullRequest,
-  PullRequestId,
-  Repository,
   RepositoryId,
   Run,
   RunId,
@@ -71,8 +66,10 @@ export class SqliteRuntimeStore implements RuntimeStore {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { createRequire } = (await import('node:module')) as any;
     const req = createRequire(import.meta.url);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { DatabaseSync: DS } = req('node:sqlite') as { DatabaseSync: new (path: string) => DatabaseSync };
+
+    const { DatabaseSync: DS } = req('node:sqlite') as {
+      DatabaseSync: new (path: string) => DatabaseSync;
+    };
     const db: DatabaseSync = new DS(databasePath);
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA foreign_keys = ON');
@@ -87,14 +84,16 @@ export class SqliteRuntimeStore implements RuntimeStore {
   // ─── Projects ──────────────────────────────────────────────────────────────
 
   public async getProject(projectId: ProjectId): Promise<Project | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM projects WHERE id = ?')
-      .get(projectId) as ProjectRow | undefined;
+    const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as
+      | ProjectRow
+      | undefined;
     return row ? projectFromRow(row) : undefined;
   }
 
   public async saveProject(project: Project): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO projects (id, name, tracker_provider, tracker_id, tracker_url, repository_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -104,29 +103,33 @@ export class SqliteRuntimeStore implements RuntimeStore {
         tracker_url = excluded.tracker_url,
         repository_id = excluded.repository_id,
         updated_at = excluded.updated_at
-    `).run(
-      project.id,
-      project.name,
-      project.trackerReference?.provider ?? null,
-      project.trackerReference?.id ?? null,
-      project.trackerReference?.url ?? null,
-      project.repositoryId ?? null,
-      project.createdAt,
-      project.updatedAt,
-    );
+    `,
+      )
+      .run(
+        project.id,
+        project.name,
+        project.trackerReference?.provider ?? null,
+        project.trackerReference?.id ?? null,
+        project.trackerReference?.url ?? null,
+        project.repositoryId ?? null,
+        project.createdAt,
+        project.updatedAt,
+      );
   }
 
   // ─── Tasks ─────────────────────────────────────────────────────────────────
 
   public async getTask(taskId: TaskId): Promise<Task | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM tasks WHERE id = ?')
-      .get(taskId) as TaskRow | undefined;
+    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as
+      | TaskRow
+      | undefined;
     return row ? taskFromRow(row) : undefined;
   }
 
   public async saveTask(task: Task): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO tasks (id, project_id, title, description, status, tracker_provider, tracker_id, tracker_url, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -137,26 +140,28 @@ export class SqliteRuntimeStore implements RuntimeStore {
         tracker_id = excluded.tracker_id,
         tracker_url = excluded.tracker_url,
         updated_at = excluded.updated_at
-    `).run(
-      task.id,
-      task.projectId,
-      task.title,
-      task.description ?? null,
-      task.status,
-      task.trackerReference?.provider ?? null,
-      task.trackerReference?.id ?? null,
-      task.trackerReference?.url ?? null,
-      task.createdAt,
-      task.updatedAt,
-    );
+    `,
+      )
+      .run(
+        task.id,
+        task.projectId,
+        task.title,
+        task.description ?? null,
+        task.status,
+        task.trackerReference?.provider ?? null,
+        task.trackerReference?.id ?? null,
+        task.trackerReference?.url ?? null,
+        task.createdAt,
+        task.updatedAt,
+      );
   }
 
   // ─── TaskGraphs ────────────────────────────────────────────────────────────
 
   public async getTaskGraph(taskGraphId: TaskGraphId): Promise<TaskGraph | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM task_graphs WHERE id = ?')
-      .get(taskGraphId) as TaskGraphRow | undefined;
+    const row = this.db.prepare('SELECT * FROM task_graphs WHERE id = ?').get(taskGraphId) as
+      | TaskGraphRow
+      | undefined;
     if (!row) return undefined;
 
     const taskIds = (
@@ -183,23 +188,37 @@ export class SqliteRuntimeStore implements RuntimeStore {
 
   public async saveTaskGraph(taskGraph: TaskGraph): Promise<void> {
     const save = () => {
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO task_graphs (id, project_id, created_at, updated_at)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
-      `).run(taskGraph.id, taskGraph.projectId, taskGraph.createdAt, taskGraph.updatedAt);
+      `,
+        )
+        .run(taskGraph.id, taskGraph.projectId, taskGraph.createdAt, taskGraph.updatedAt);
 
       this.db.prepare('DELETE FROM task_graph_tasks WHERE task_graph_id = ?').run(taskGraph.id);
       for (const taskId of taskGraph.taskIds) {
-        this.db.prepare('INSERT OR IGNORE INTO task_graph_tasks (task_graph_id, task_id) VALUES (?, ?)').run(taskGraph.id, taskId);
+        this.db
+          .prepare('INSERT OR IGNORE INTO task_graph_tasks (task_graph_id, task_id) VALUES (?, ?)')
+          .run(taskGraph.id, taskId);
       }
 
-      this.db.prepare('DELETE FROM task_dependencies WHERE task_id IN (SELECT task_id FROM task_graph_tasks WHERE task_graph_id = ?)').run(taskGraph.id);
+      this.db
+        .prepare(
+          'DELETE FROM task_dependencies WHERE task_id IN (SELECT task_id FROM task_graph_tasks WHERE task_graph_id = ?)',
+        )
+        .run(taskGraph.id);
       for (const dep of taskGraph.dependencies) {
-        this.db.prepare(`
+        this.db
+          .prepare(
+            `
           INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id, kind)
           VALUES (?, ?, ?, ?)
-        `).run(dep.id, dep.taskId, dep.dependsOnTaskId, dep.kind);
+        `,
+          )
+          .run(dep.id, dep.taskId, dep.dependsOnTaskId, dep.kind);
       }
     };
     this.runInTransaction(save);
@@ -207,7 +226,9 @@ export class SqliteRuntimeStore implements RuntimeStore {
 
   // ─── ExecutionNodes ────────────────────────────────────────────────────────
 
-  public async getExecutionNode(executionNodeId: ExecutionNodeId): Promise<ExecutionNode | undefined> {
+  public async getExecutionNode(
+    executionNodeId: ExecutionNodeId,
+  ): Promise<ExecutionNode | undefined> {
     const row = this.db
       .prepare('SELECT * FROM execution_nodes WHERE id = ?')
       .get(executionNodeId) as ExecutionNodeRow | undefined;
@@ -215,22 +236,32 @@ export class SqliteRuntimeStore implements RuntimeStore {
   }
 
   public async saveExecutionNode(node: ExecutionNode): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO execution_nodes (id, run_id, task_id, state, agent_session_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         state = excluded.state,
         agent_session_id = excluded.agent_session_id,
         updated_at = excluded.updated_at
-    `).run(node.id, node.runId, node.taskId, node.state, node.agentSessionId ?? null, node.createdAt, node.updatedAt);
+    `,
+      )
+      .run(
+        node.id,
+        node.runId,
+        node.taskId,
+        node.state,
+        node.agentSessionId ?? null,
+        node.createdAt,
+        node.updatedAt,
+      );
   }
 
   // ─── Runs ──────────────────────────────────────────────────────────────────
 
   public async getRun(runId: RunId): Promise<Run | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM runs WHERE id = ?')
-      .get(runId) as RunRow | undefined;
+    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) as RunRow | undefined;
     if (!row) return undefined;
 
     const nodeIds = (
@@ -244,7 +275,9 @@ export class SqliteRuntimeStore implements RuntimeStore {
 
   public async saveRun(run: Run): Promise<void> {
     const save = () => {
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO runs (id, project_id, task_id, workflow_run_id, state, workspace_id, created_at, updated_at, completed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -253,16 +286,27 @@ export class SqliteRuntimeStore implements RuntimeStore {
           workflow_run_id = excluded.workflow_run_id,
           updated_at = excluded.updated_at,
           completed_at = excluded.completed_at
-      `).run(
-        run.id, run.projectId, run.taskId,
-        run.workflowRunId ?? null, run.state,
-        run.workspaceId ?? null,
-        run.createdAt, run.updatedAt, run.completedAt ?? null,
-      );
+      `,
+        )
+        .run(
+          run.id,
+          run.projectId,
+          run.taskId,
+          run.workflowRunId ?? null,
+          run.state,
+          run.workspaceId ?? null,
+          run.createdAt,
+          run.updatedAt,
+          run.completedAt ?? null,
+        );
 
       this.db.prepare('DELETE FROM run_execution_nodes WHERE run_id = ?').run(run.id);
       for (const nodeId of run.executionNodeIds) {
-        this.db.prepare('INSERT OR IGNORE INTO run_execution_nodes (run_id, execution_node_id) VALUES (?, ?)').run(run.id, nodeId);
+        this.db
+          .prepare(
+            'INSERT OR IGNORE INTO run_execution_nodes (run_id, execution_node_id) VALUES (?, ?)',
+          )
+          .run(run.id, nodeId);
       }
     };
     this.runInTransaction(save);
@@ -271,9 +315,9 @@ export class SqliteRuntimeStore implements RuntimeStore {
   // ─── WorkflowRuns ──────────────────────────────────────────────────────────
 
   public async getWorkflowRun(workflowRunId: WorkflowRunId): Promise<WorkflowRun | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM workflow_runs WHERE id = ?')
-      .get(workflowRunId) as WorkflowRunRow | undefined;
+    const row = this.db.prepare('SELECT * FROM workflow_runs WHERE id = ?').get(workflowRunId) as
+      | WorkflowRunRow
+      | undefined;
     if (!row) return undefined;
 
     const runIds = (
@@ -287,21 +331,36 @@ export class SqliteRuntimeStore implements RuntimeStore {
 
   public async saveWorkflowRun(workflowRun: WorkflowRun): Promise<void> {
     const save = () => {
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO workflow_runs (id, project_id, task_graph_id, state, created_at, updated_at, completed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           state = excluded.state,
           updated_at = excluded.updated_at,
           completed_at = excluded.completed_at
-      `).run(
-        workflowRun.id, workflowRun.projectId, workflowRun.taskGraphId,
-        workflowRun.state, workflowRun.createdAt, workflowRun.updatedAt, workflowRun.completedAt ?? null,
-      );
+      `,
+        )
+        .run(
+          workflowRun.id,
+          workflowRun.projectId,
+          workflowRun.taskGraphId,
+          workflowRun.state,
+          workflowRun.createdAt,
+          workflowRun.updatedAt,
+          workflowRun.completedAt ?? null,
+        );
 
-      this.db.prepare('DELETE FROM workflow_run_runs WHERE workflow_run_id = ?').run(workflowRun.id);
+      this.db
+        .prepare('DELETE FROM workflow_run_runs WHERE workflow_run_id = ?')
+        .run(workflowRun.id);
       for (const runId of workflowRun.runIds) {
-        this.db.prepare('INSERT OR IGNORE INTO workflow_run_runs (workflow_run_id, run_id) VALUES (?, ?)').run(workflowRun.id, runId);
+        this.db
+          .prepare(
+            'INSERT OR IGNORE INTO workflow_run_runs (workflow_run_id, run_id) VALUES (?, ?)',
+          )
+          .run(workflowRun.id, runId);
       }
     };
     this.runInTransaction(save);
@@ -310,38 +369,50 @@ export class SqliteRuntimeStore implements RuntimeStore {
   // ─── AgentSessions ────────────────────────────────────────────────────────
 
   public async getAgentSession(agentSessionId: AgentSessionId): Promise<AgentSession | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM agent_sessions WHERE id = ?')
-      .get(agentSessionId) as AgentSessionRow | undefined;
+    const row = this.db.prepare('SELECT * FROM agent_sessions WHERE id = ?').get(agentSessionId) as
+      | AgentSessionRow
+      | undefined;
     return row ? agentSessionFromRow(row) : undefined;
   }
 
   public async saveAgentSession(session: AgentSession): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO agent_sessions (id, run_id, task_id, execution_node_id, workspace_id, state, created_at, updated_at, completed_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         state = excluded.state,
         updated_at = excluded.updated_at,
         completed_at = excluded.completed_at
-    `).run(
-      session.id, session.runId, session.taskId, session.executionNodeId,
-      session.workspaceId, session.state,
-      session.createdAt, session.updatedAt, session.completedAt ?? null,
-    );
+    `,
+      )
+      .run(
+        session.id,
+        session.runId,
+        session.taskId,
+        session.executionNodeId,
+        session.workspaceId,
+        session.state,
+        session.createdAt,
+        session.updatedAt,
+        session.completedAt ?? null,
+      );
   }
 
   // ─── Workspaces ────────────────────────────────────────────────────────────
 
   public async getWorkspace(workspaceId: WorkspaceId): Promise<Workspace | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM workspaces WHERE id = ?')
-      .get(workspaceId) as WorkspaceRow | undefined;
+    const row = this.db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
+      | WorkspaceRow
+      | undefined;
     return row ? workspaceFromRow(row) : undefined;
   }
 
   public async saveWorkspace(workspace: Workspace): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO workspaces (id, project_id, task_id, repository_id, kind, state, path, revision, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -349,24 +420,35 @@ export class SqliteRuntimeStore implements RuntimeStore {
         path = excluded.path,
         revision = excluded.revision,
         updated_at = excluded.updated_at
-    `).run(
-      workspace.id, workspace.projectId, workspace.taskId, workspace.repositoryId,
-      workspace.kind, workspace.state, workspace.path,
-      workspace.revision ?? null, workspace.createdAt, workspace.updatedAt,
-    );
+    `,
+      )
+      .run(
+        workspace.id,
+        workspace.projectId,
+        workspace.taskId,
+        workspace.repositoryId,
+        workspace.kind,
+        workspace.state,
+        workspace.path,
+        workspace.revision ?? null,
+        workspace.createdAt,
+        workspace.updatedAt,
+      );
   }
 
   // ─── Interventions ────────────────────────────────────────────────────────
 
   public async getIntervention(interventionId: InterventionId): Promise<Intervention | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM interventions WHERE id = ?')
-      .get(interventionId) as InterventionRow | undefined;
+    const row = this.db.prepare('SELECT * FROM interventions WHERE id = ?').get(interventionId) as
+      | InterventionRow
+      | undefined;
     return row ? interventionFromRow(row) : undefined;
   }
 
   public async saveIntervention(intervention: Intervention): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO interventions (id, scope, target_id, kind, status, summary, details, created_at, updated_at, resolved_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -374,23 +456,27 @@ export class SqliteRuntimeStore implements RuntimeStore {
         details = excluded.details,
         updated_at = excluded.updated_at,
         resolved_at = excluded.resolved_at
-    `).run(
-      intervention.id,
-      intervention.scope,
-      intervention.targetId,
-      intervention.kind,
-      intervention.status,
-      intervention.summary,
-      intervention.details ?? null,
-      intervention.createdAt,
-      intervention.updatedAt,
-      intervention.resolvedAt ?? null,
-    );
+    `,
+      )
+      .run(
+        intervention.id,
+        intervention.scope,
+        intervention.targetId,
+        intervention.kind,
+        intervention.status,
+        intervention.summary,
+        intervention.details ?? null,
+        intervention.createdAt,
+        intervention.updatedAt,
+        intervention.resolvedAt ?? null,
+      );
   }
 
   // ─── Configurations ───────────────────────────────────────────────────────
 
-  public async getConfiguration(configurationId: ConfigurationId): Promise<Configuration | undefined> {
+  public async getConfiguration(
+    configurationId: ConfigurationId,
+  ): Promise<Configuration | undefined> {
     const row = this.db
       .prepare('SELECT * FROM configurations WHERE id = ?')
       .get(configurationId) as ConfigRow | undefined;
@@ -398,40 +484,52 @@ export class SqliteRuntimeStore implements RuntimeStore {
   }
 
   public async saveConfiguration(configuration: Configuration): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO configurations (id, project_id, key, value, version, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         value = excluded.value,
         version = excluded.version,
         updated_at = excluded.updated_at
-    `).run(
-      configuration.id,
-      configuration.projectId ?? null,
-      configuration.key,
-      JSON.stringify(configuration.value),
-      configuration.version,
-      configuration.updatedAt,
-    );
+    `,
+      )
+      .run(
+        configuration.id,
+        configuration.projectId ?? null,
+        configuration.key,
+        JSON.stringify(configuration.value),
+        configuration.version,
+        configuration.updatedAt,
+      );
   }
 
   // ─── Events ───────────────────────────────────────────────────────────────
 
   public async appendEvent(event: DomainEvent): Promise<void> {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT OR IGNORE INTO events (id, type, occurred_at, payload)
       VALUES (?, ?, ?, ?)
-    `).run(event.id, event.type, event.occurredAt, JSON.stringify(event.payload));
+    `,
+      )
+      .run(event.id, event.type, event.occurredAt, JSON.stringify(event.payload));
   }
 
   public async getEvent(eventId: EventId): Promise<DomainEvent | undefined> {
-    const row = this.db
-      .prepare('SELECT * FROM events WHERE id = ?')
-      .get(eventId) as EventRow | undefined;
+    const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(eventId) as
+      | EventRow
+      | undefined;
     return row ? eventFromRow(row) : undefined;
   }
 
-  public async listEvents(options?: { type?: string; limit?: number; afterSeq?: number }): Promise<DomainEvent[]> {
+  public async listEvents(options?: {
+    type?: string;
+    limit?: number;
+    afterSeq?: number;
+  }): Promise<DomainEvent[]> {
     let sql = 'SELECT * FROM events WHERE 1=1';
     const params: (string | number)[] = [];
     if (options?.type) {
@@ -455,13 +553,24 @@ export class SqliteRuntimeStore implements RuntimeStore {
 
   public getDiagnostics(): DiagnosticInfo {
     const schemaVersion = getSchemaVersion(this.db);
-    const tables = ['projects', 'tasks', 'runs', 'workflow_runs', 'agent_sessions', 'workspaces', 'interventions', 'events'];
+    const tables = [
+      'projects',
+      'tasks',
+      'runs',
+      'workflow_runs',
+      'agent_sessions',
+      'workspaces',
+      'interventions',
+      'events',
+    ];
     const counts: Record<string, number> = {};
     for (const table of tables) {
       const row = this.db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as { c: number };
       counts[table] = row.c;
     }
-    const integrity = this.db.prepare('PRAGMA integrity_check').get() as { integrity_check: string };
+    const integrity = this.db.prepare('PRAGMA integrity_check').get() as {
+      integrity_check: string;
+    };
     return {
       schemaVersion,
       counts,
@@ -491,9 +600,14 @@ export class SqliteRuntimeStore implements RuntimeStore {
 // ─── Row types & mappers ──────────────────────────────────────────────────────
 
 interface ProjectRow {
-  id: string; name: string;
-  tracker_provider: string | null; tracker_id: string | null; tracker_url: string | null;
-  repository_id: string | null; created_at: string; updated_at: string;
+  id: string;
+  name: string;
+  tracker_provider: string | null;
+  tracker_id: string | null;
+  tracker_url: string | null;
+  repository_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 function projectFromRow(r: ProjectRow): Project {
@@ -514,9 +628,16 @@ function projectFromRow(r: ProjectRow): Project {
 }
 
 interface TaskRow {
-  id: string; project_id: string; title: string; description: string | null;
-  status: string; tracker_provider: string | null; tracker_id: string | null;
-  tracker_url: string | null; created_at: string; updated_at: string;
+  id: string;
+  project_id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  tracker_provider: string | null;
+  tracker_id: string | null;
+  tracker_url: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 function taskFromRow(r: TaskRow): Task {
@@ -538,8 +659,18 @@ function taskFromRow(r: TaskRow): Task {
   return base;
 }
 
-interface TaskGraphRow { id: string; project_id: string; created_at: string; updated_at: string; }
-interface DepRow { id: string; task_id: string; depends_on_task_id: string; kind: string; }
+interface TaskGraphRow {
+  id: string;
+  project_id: string;
+  created_at: string;
+  updated_at: string;
+}
+interface DepRow {
+  id: string;
+  task_id: string;
+  depends_on_task_id: string;
+  kind: string;
+}
 
 function depFromRow(r: DepRow): TaskGraph['dependencies'][number] {
   return {
@@ -551,8 +682,13 @@ function depFromRow(r: DepRow): TaskGraph['dependencies'][number] {
 }
 
 interface ExecutionNodeRow {
-  id: string; run_id: string; task_id: string; state: string;
-  agent_session_id: string | null; created_at: string; updated_at: string;
+  id: string;
+  run_id: string;
+  task_id: string;
+  state: string;
+  agent_session_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 function executionNodeFromRow(r: ExecutionNodeRow): ExecutionNode {
@@ -564,13 +700,21 @@ function executionNodeFromRow(r: ExecutionNodeRow): ExecutionNode {
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
-  if (r.agent_session_id) Object.assign(base, { agentSessionId: r.agent_session_id as AgentSessionId });
+  if (r.agent_session_id)
+    Object.assign(base, { agentSessionId: r.agent_session_id as AgentSessionId });
   return base;
 }
 
 interface RunRow {
-  id: string; project_id: string; task_id: string; workflow_run_id: string | null;
-  state: string; workspace_id: string | null; created_at: string; updated_at: string; completed_at: string | null;
+  id: string;
+  project_id: string;
+  task_id: string;
+  workflow_run_id: string | null;
+  state: string;
+  workspace_id: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 function runFromRow(r: RunRow, executionNodeIds: ExecutionNodeId[]): Run {
@@ -590,8 +734,13 @@ function runFromRow(r: RunRow, executionNodeIds: ExecutionNodeId[]): Run {
 }
 
 interface WorkflowRunRow {
-  id: string; project_id: string; task_graph_id: string; state: string;
-  created_at: string; updated_at: string; completed_at: string | null;
+  id: string;
+  project_id: string;
+  task_graph_id: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 function workflowRunFromRow(r: WorkflowRunRow, runIds: RunId[]): WorkflowRun {
@@ -609,8 +758,15 @@ function workflowRunFromRow(r: WorkflowRunRow, runIds: RunId[]): WorkflowRun {
 }
 
 interface AgentSessionRow {
-  id: string; run_id: string; task_id: string; execution_node_id: string;
-  workspace_id: string; state: string; created_at: string; updated_at: string; completed_at: string | null;
+  id: string;
+  run_id: string;
+  task_id: string;
+  execution_node_id: string;
+  workspace_id: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 function agentSessionFromRow(r: AgentSessionRow): AgentSession {
@@ -629,9 +785,16 @@ function agentSessionFromRow(r: AgentSessionRow): AgentSession {
 }
 
 interface WorkspaceRow {
-  id: string; project_id: string; task_id: string; repository_id: string;
-  kind: string; state: string; path: string; revision: string | null;
-  created_at: string; updated_at: string;
+  id: string;
+  project_id: string;
+  task_id: string;
+  repository_id: string;
+  kind: string;
+  state: string;
+  path: string;
+  revision: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 function workspaceFromRow(r: WorkspaceRow): Workspace {
@@ -651,8 +814,16 @@ function workspaceFromRow(r: WorkspaceRow): Workspace {
 }
 
 interface InterventionRow {
-  id: string; scope: string; target_id: string; kind: string; status: string;
-  summary: string; details: string | null; created_at: string; updated_at: string; resolved_at: string | null;
+  id: string;
+  scope: string;
+  target_id: string;
+  kind: string;
+  status: string;
+  summary: string;
+  details: string | null;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
 }
 
 function makeInterventionBase(r: InterventionRow) {
@@ -674,12 +845,20 @@ function interventionFromRow(r: InterventionRow): Intervention {
   const scope = r.scope as Intervention['scope'];
   if (scope === 'task') return { ...base, scope, targetId: r.target_id as TaskId } as Intervention;
   if (scope === 'run') return { ...base, scope, targetId: r.target_id as RunId } as Intervention;
-  return { ...base, scope: 'agent' as const, targetId: r.target_id as AgentSessionId } as Intervention;
+  return {
+    ...base,
+    scope: 'agent' as const,
+    targetId: r.target_id as AgentSessionId,
+  } as Intervention;
 }
 
 interface ConfigRow {
-  id: string; project_id: string | null; key: string;
-  value: string; version: number; updated_at: string;
+  id: string;
+  project_id: string | null;
+  key: string;
+  value: string;
+  version: number;
+  updated_at: string;
 }
 
 function configFromRow(r: ConfigRow): Configuration {
@@ -694,7 +873,13 @@ function configFromRow(r: ConfigRow): Configuration {
   return base;
 }
 
-interface EventRow { id: string; type: string; occurred_at: string; payload: string; seq: number; }
+interface EventRow {
+  id: string;
+  type: string;
+  occurred_at: string;
+  payload: string;
+  seq: number;
+}
 
 function eventFromRow(r: EventRow): DomainEvent {
   return {

@@ -7,7 +7,7 @@
 
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { access, readFile } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const execAsync = promisify(exec);
@@ -49,7 +49,11 @@ export async function runDoctor(projectRoot: string): Promise<DoctorReport> {
     const { stdout } = await execAsync('pnpm --version');
     checks.push({ name: 'pnpm', status: 'ok', message: `pnpm ${stdout.trim()}` });
   } catch {
-    checks.push({ name: 'pnpm', status: 'warn', message: 'pnpm not found — optional for development' });
+    checks.push({
+      name: 'pnpm',
+      status: 'warn',
+      message: 'pnpm not found — optional for development',
+    });
   }
 
   // Repository state
@@ -57,7 +61,11 @@ export async function runDoctor(projectRoot: string): Promise<DoctorReport> {
     await execAsync('git rev-parse --git-dir', { cwd: projectRoot });
     checks.push({ name: 'repository', status: 'ok', message: `Git repository at ${projectRoot}` });
   } catch {
-    checks.push({ name: 'repository', status: 'error', message: `${projectRoot} is not a Git repository` });
+    checks.push({
+      name: 'repository',
+      status: 'error',
+      message: `${projectRoot} is not a Git repository`,
+    });
   }
 
   // Config file
@@ -66,15 +74,28 @@ export async function runDoctor(projectRoot: string): Promise<DoctorReport> {
     await access(configPath);
     checks.push({ name: 'config', status: 'ok', message: `.dark-kitchen/config.yaml found` });
   } catch {
-    checks.push({ name: 'config', status: 'warn', message: `.dark-kitchen/config.yaml not found — run dk init` });
+    checks.push({
+      name: 'config',
+      status: 'warn',
+      message: `.dark-kitchen/config.yaml not found — run dk init`,
+    });
   }
 
   // Tracker credentials
-  const trackerToken = process.env['GITHUB_TOKEN'] ?? process.env['LINEAR_API_KEY'] ?? process.env['JIRA_TOKEN'];
+  const trackerToken =
+    process.env['GITHUB_TOKEN'] ?? process.env['LINEAR_API_KEY'] ?? process.env['JIRA_TOKEN'];
   if (trackerToken) {
-    checks.push({ name: 'tracker-auth', status: 'ok', message: 'Tracker token found in environment' });
+    checks.push({
+      name: 'tracker-auth',
+      status: 'ok',
+      message: 'Tracker token found in environment',
+    });
   } else {
-    checks.push({ name: 'tracker-auth', status: 'warn', message: 'No tracker token found in GITHUB_TOKEN / LINEAR_API_KEY / JIRA_TOKEN' });
+    checks.push({
+      name: 'tracker-auth',
+      status: 'warn',
+      message: 'No tracker token found in GITHUB_TOKEN / LINEAR_API_KEY / JIRA_TOKEN',
+    });
   }
 
   // acpx
@@ -82,18 +103,28 @@ export async function runDoctor(projectRoot: string): Promise<DoctorReport> {
     const { stdout } = await execAsync('acpx --version');
     checks.push({ name: 'acpx', status: 'ok', message: `acpx ${stdout.trim()}` });
   } catch {
-    checks.push({ name: 'acpx', status: 'warn', message: 'acpx not found — required for ACP harnesses' });
+    checks.push({
+      name: 'acpx',
+      status: 'warn',
+      message: 'acpx not found — required for ACP harnesses',
+    });
   }
 
   // SQLite (node:sqlite)
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { createRequire } = (await import('node:module')) as any as { createRequire: (url: string) => NodeRequire };
+    const { createRequire } = (await import('node:module')) as any as {
+      createRequire: (url: string) => NodeRequire;
+    };
     const req = createRequire(import.meta.url);
     req('node:sqlite');
     checks.push({ name: 'sqlite', status: 'ok', message: 'node:sqlite available' });
   } catch {
-    checks.push({ name: 'sqlite', status: 'error', message: 'node:sqlite not available — requires Node >=22.5 with --experimental-sqlite' });
+    checks.push({
+      name: 'sqlite',
+      status: 'error',
+      message: 'node:sqlite not available — requires Node >=22.5 with --experimental-sqlite',
+    });
   }
 
   // OpenClaw (optional)
@@ -101,9 +132,17 @@ export async function runDoctor(projectRoot: string): Promise<DoctorReport> {
   if (openclawUrl) {
     try {
       const response = await fetch(`${openclawUrl}/health`, { signal: AbortSignal.timeout(3000) });
-      checks.push({ name: 'openclaw', status: response.ok ? 'ok' : 'warn', message: `OpenClaw at ${openclawUrl}: ${response.status}` });
+      checks.push({
+        name: 'openclaw',
+        status: response.ok ? 'ok' : 'warn',
+        message: `OpenClaw at ${openclawUrl}: ${response.status}`,
+      });
     } catch {
-      checks.push({ name: 'openclaw', status: 'warn', message: `OpenClaw at ${openclawUrl} is unreachable` });
+      checks.push({
+        name: 'openclaw',
+        status: 'warn',
+        message: `OpenClaw at ${openclawUrl} is unreachable`,
+      });
     }
   } else {
     checks.push({ name: 'openclaw', status: 'ok', message: 'OpenClaw not configured (optional)' });

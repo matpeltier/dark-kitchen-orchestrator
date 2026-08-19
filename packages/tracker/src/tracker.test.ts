@@ -1,10 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import {
-  MockTrackerAdapter,
-  CyclicDependencyError,
-  wouldCreateCycle,
-} from './index.js';
-import { createTaskId, createTaskDependencyId } from '@dark-kitchen/core';
+import { MockTrackerAdapter, CyclicDependencyError, wouldCreateCycle } from './index.js';
+import { createTaskId } from '@dark-kitchen/core';
 
 // ─── Shared adapter contract tests ───────────────────────────────────────────
 
@@ -45,7 +41,9 @@ describe('MockTrackerAdapter - shared contract', () => {
     const taskB = await adapter.createTask({ projectId: 'mock-project' as never, title: 'B' });
     const dep = await adapter.addDependency({ taskId: taskB.id, dependsOnTaskId: taskA.id });
     const deps = await adapter.listDependencies(taskB.id);
-    expect(deps).toContainEqual(expect.objectContaining({ taskId: taskB.id, dependsOnTaskId: taskA.id }));
+    expect(deps).toContainEqual(
+      expect.objectContaining({ taskId: taskB.id, dependsOnTaskId: taskA.id }),
+    );
     await adapter.removeDependency(dep.id);
     const depsAfter = await adapter.listDependencies(taskB.id);
     expect(depsAfter.filter((d) => d.id === dep.id)).toHaveLength(0);
@@ -94,7 +92,9 @@ describe('wouldCreateCycle', () => {
   });
 
   it('detects a transitive cycle', () => {
-    const a = createTaskId('a'), b = createTaskId('b'), c = createTaskId('c');
+    const a = createTaskId('a'),
+      b = createTaskId('b'),
+      c = createTaskId('c');
     const deps = new Map([
       [b, new Set([a])],
       [c, new Set([b])],
@@ -103,7 +103,9 @@ describe('wouldCreateCycle', () => {
   });
 
   it('allows a valid dependency', () => {
-    const a = createTaskId('a'), b = createTaskId('b'), c = createTaskId('c');
+    const a = createTaskId('a'),
+      b = createTaskId('b'),
+      c = createTaskId('c');
     const deps = new Map([[b, new Set([a])]]);
     expect(wouldCreateCycle(deps, c, b)).toBe(false);
   });

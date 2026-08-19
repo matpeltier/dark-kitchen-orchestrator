@@ -19,19 +19,17 @@ export async function createMcpServer(ctx: McpContext): Promise<McpServer> {
 
   for (const tool of ALL_TOOLS) {
     // Register each tool with the MCP SDK
-    server.tool(
-      tool.name,
-      tool.description,
-      {},
-      async (rawArgs: unknown) => {
-        const args = (rawArgs && typeof rawArgs === 'object' ? rawArgs : {}) as Record<string, unknown>;
-        const result = await handleTool(tool.name, args, ctx);
-        if (result.success) {
-          return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
-        }
-        return { content: [{ type: 'text', text: `Error: ${result.error}` }], isError: true };
-      },
-    );
+    server.tool(tool.name, tool.description, {}, async (rawArgs: unknown) => {
+      const args = (rawArgs && typeof rawArgs === 'object' ? rawArgs : {}) as Record<
+        string,
+        unknown
+      >;
+      const result = await handleTool(tool.name, args, ctx);
+      if (result.success) {
+        return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
+      }
+      return { content: [{ type: 'text', text: `Error: ${result.error}` }], isError: true };
+    });
   }
 
   return server;

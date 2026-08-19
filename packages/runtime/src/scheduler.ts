@@ -5,13 +5,7 @@
  * limits, and launches durable workflow runs without double-scheduling.
  */
 
-import type {
-  Task,
-  TaskId,
-  TaskDependency,
-  RunId,
-  ProjectId,
-} from '@dark-kitchen/core';
+import type { Task, TaskId, TaskDependency, RunId, ProjectId } from '@dark-kitchen/core';
 import { validateTaskGraph, createTaskGraphId, DomainValidationError } from '@dark-kitchen/core';
 
 export interface SchedulerConfig {
@@ -50,7 +44,7 @@ export function computeReadyTasks(
   try {
     validateTaskGraph({
       id: createTaskGraphId('scheduler-check'),
-      projectId: tasks[0]?.projectId ?? 'unknown' as ProjectId,
+      projectId: tasks[0]?.projectId ?? ('unknown' as ProjectId),
       taskIds: tasks.map((t) => t.id),
       dependencies,
       createdAt: new Date().toISOString(),
@@ -63,9 +57,7 @@ export function computeReadyTasks(
     throw err;
   }
 
-  const completedTaskIds = new Set(
-    tasks.filter((t) => t.status === 'completed').map((t) => t.id),
-  );
+  const completedTaskIds = new Set(tasks.filter((t) => t.status === 'completed').map((t) => t.id));
 
   // Build "blocked by" map: taskId -> set of taskIds it depends on
   const blockedBy = new Map<TaskId, Set<TaskId>>();

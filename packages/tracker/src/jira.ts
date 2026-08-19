@@ -13,11 +13,7 @@ import type {
   TaskDependencyId,
   TrackerReference,
 } from '@dark-kitchen/core';
-import {
-  createProjectId,
-  createTaskId,
-  createTaskDependencyId,
-} from '@dark-kitchen/core';
+import { createProjectId, createTaskId, createTaskDependencyId } from '@dark-kitchen/core';
 import type {
   AddDependencyInput,
   CommentInput,
@@ -51,7 +47,7 @@ const DEFAULT_TRANSITION_MAP: Readonly<Record<Task['status'], string>> = {
   active: 'In Progress',
   blocked: 'In Review',
   completed: 'Done',
-  cancelled: 'Won\'t Do',
+  cancelled: "Won't Do",
 };
 
 export class JiraTrackerAdapter implements FullTrackerAdapter {
@@ -69,7 +65,9 @@ export class JiraTrackerAdapter implements FullTrackerAdapter {
   }
 
   public async getProject(reference: TrackerReference): Promise<Project> {
-    const data = await this.jiraGet<{ id: string; key: string; name: string }>(`/rest/api/3/project/${reference.id}`);
+    const data = await this.jiraGet<{ id: string; key: string; name: string }>(
+      `/rest/api/3/project/${reference.id}`,
+    );
     const projectId = createProjectId(`${PROVIDER}:${reference.id}`);
     const now = new Date().toISOString();
     return {
@@ -181,7 +179,9 @@ export class JiraTrackerAdapter implements FullTrackerAdapter {
 
   public async listDependencies(taskId: TaskId): Promise<readonly TaskDependency[]> {
     const depIds = this.depsByTask.get(taskId) ?? new Set<string>();
-    return [...depIds].map((id) => this.dependencies.get(id)).filter((d): d is TaskDependency => d !== undefined);
+    return [...depIds]
+      .map((id) => this.dependencies.get(id))
+      .filter((d): d is TaskDependency => d !== undefined);
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
@@ -203,13 +203,15 @@ export class JiraTrackerAdapter implements FullTrackerAdapter {
       createdAt: issue.fields?.created ?? new Date().toISOString(),
       updatedAt: issue.fields?.updated ?? new Date().toISOString(),
     };
-    if (issue.fields?.description) Object.assign(base, { description: String(issue.fields.description) });
+    if (issue.fields?.description)
+      Object.assign(base, { description: String(issue.fields.description) });
     return base;
   }
 
   private jiraStatusToStatus(statusName: string): Task['status'] {
     const lower = statusName.toLowerCase();
-    if (lower.includes('done') || lower.includes('completed') || lower.includes('resolved')) return 'completed';
+    if (lower.includes('done') || lower.includes('completed') || lower.includes('resolved'))
+      return 'completed';
     if (lower.includes('cancel') || lower.includes("won't")) return 'cancelled';
     if (lower.includes('in progress') || lower.includes('active')) return 'active';
     if (lower.includes('review') || lower.includes('block')) return 'blocked';
@@ -219,12 +221,14 @@ export class JiraTrackerAdapter implements FullTrackerAdapter {
 
   private async transitionIssue(key: string, status: Task['status']): Promise<void> {
     const transitionName = this.transitionMap[status];
-    const { transitions } = await this.jiraGet<{ transitions: Array<{ id: string; name: string }> }>(
-      `/rest/api/3/issue/${key}/transitions`,
-    );
+    const { transitions } = await this.jiraGet<{
+      transitions: Array<{ id: string; name: string }>;
+    }>(`/rest/api/3/issue/${key}/transitions`);
     const transition = transitions.find((t) => t.name === transitionName);
     if (!transition) return; // Transition may not be available; fail silently
-    await this.jiraPost(`/rest/api/3/issue/${key}/transitions`, { transition: { id: transition.id } });
+    await this.jiraPost(`/rest/api/3/issue/${key}/transitions`, {
+      transition: { id: transition.id },
+    });
   }
 
   private buildDependencyGraph(): Map<TaskId, Set<TaskId>> {

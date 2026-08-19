@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
 import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
@@ -137,11 +137,7 @@ export class ConfigStore {
   public async restore(sourcePath: string): Promise<void> {
     await mkdir(dirname(this.configPath), { recursive: true });
     const tmpPath = `${this.configPath}.restore.tmp`;
-    await pipeline(
-      createReadStream(sourcePath),
-      createGunzip(),
-      createWriteStream(tmpPath),
-    );
+    await pipeline(createReadStream(sourcePath), createGunzip(), createWriteStream(tmpPath));
     await rename(tmpPath, this.configPath);
   }
 }

@@ -7,7 +7,7 @@ import {
   SqliteDurableJournal,
 } from './index.js';
 import { runWorkflow } from '@dark-kitchen/workflow-engine';
-import type { Task, TaskDependency, RunId } from '@dark-kitchen/core';
+import type { Task, TaskDependency } from '@dark-kitchen/core';
 import {
   createProjectId,
   createRunId,
@@ -196,7 +196,10 @@ describe('InProcessDurableJournal', () => {
   it('workflow replays completed calls on second run', async () => {
     const journal = new InProcessDurableJournal();
     let callCount = 0;
-    const resolver = () => async () => { callCount++; return 'ok'; };
+    const resolver = () => async () => {
+      callCount++;
+      return 'ok';
+    };
 
     await runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'p' }), {
       runId: 'r1',
@@ -234,26 +237,38 @@ describe('SqliteDurableJournal', () => {
     const journal = new SqliteDurableJournal(':memory:', 'run-restart');
     let step1Calls = 0;
     let step2Calls = 0;
-    const resolver = (role: string) => async (input: { prompt: string }) => {
-      if (role === 'step1') { step1Calls++; return 'step1-result'; }
-      if (role === 'step2') { step2Calls++; return 'step2-result'; }
+    const resolver = (role: string) => async (_input: { prompt: string }) => {
+      if (role === 'step1') {
+        step1Calls++;
+        return 'step1-result';
+      }
+      if (role === 'step2') {
+        step2Calls++;
+        return 'step2-result';
+      }
       return 'unknown';
     };
 
     // First run: complete step1, fail before step2
-    await runWorkflow(async (b) => {
-      await b.agent({ role: 'step1', prompt: 'p1' });
-      // Simulate not reaching step2 (process death)
-      return 'partial';
-    }, { runId: 'run-restart', journal, resolver });
+    await runWorkflow(
+      async (b) => {
+        await b.agent({ role: 'step1', prompt: 'p1' });
+        // Simulate not reaching step2 (process death)
+        return 'partial';
+      },
+      { runId: 'run-restart', journal, resolver },
+    );
 
     // Second run: step1 should be replayed from journal
     step1Calls = 0; // reset counter for second run
-    await runWorkflow(async (b) => {
-      await b.agent({ role: 'step1', prompt: 'p1' });
-      await b.agent({ role: 'step2', prompt: 'p2' });
-      return 'complete';
-    }, { runId: 'run-restart', journal, resolver });
+    await runWorkflow(
+      async (b) => {
+        await b.agent({ role: 'step1', prompt: 'p1' });
+        await b.agent({ role: 'step2', prompt: 'p2' });
+        return 'complete';
+      },
+      { runId: 'run-restart', journal, resolver },
+    );
 
     expect(step1Calls).toBe(0); // replayed from journal
     expect(step2Calls).toBe(1); // executed for first time

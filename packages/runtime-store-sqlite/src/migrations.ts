@@ -218,8 +218,8 @@ export function runMigrations(db: DatabaseSync): void {
 }
 
 export function getSchemaVersion(db: DatabaseSync): number {
-  const row = db
-    .prepare('SELECT MAX(version) as v FROM schema_migrations')
-    .get() as { v: number | null } | undefined;
+  const row = db.prepare('SELECT MAX(version) as v FROM schema_migrations').get() as
+    | { v: number | null }
+    | undefined;
   return row?.v ?? 0;
 }

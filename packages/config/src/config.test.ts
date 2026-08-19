@@ -95,9 +95,7 @@ describe('validateConfig - unknown references', () => {
     expect(() =>
       validateConfig({
         version: 1,
-        verificationProfiles: [
-          { id: 'vp', requiredCapabilities: ['missing-cap'] },
-        ],
+        verificationProfiles: [{ id: 'vp', requiredCapabilities: ['missing-cap'] }],
       }),
     ).toThrow(ConfigValidationError);
   });
@@ -206,10 +204,14 @@ describe('ConfigStore', () => {
     const events: string[] = [];
     const store = new ConfigStore({
       projectRoot,
-      onChanged: (e) => { events.push(e.type); },
+      onChanged: (e) => {
+        events.push(e.type);
+      },
     });
     await store.write(SAMPLE_GITHUB_ISSUES_CONFIG);
-    const patched = await store.patch({ concurrency: { maxParallelTasks: 8, maxParallelWorkflows: 4 } });
+    const patched = await store.patch({
+      concurrency: { maxParallelTasks: 8, maxParallelWorkflows: 4 },
+    });
     expect(patched.concurrency?.maxParallelTasks).toBe(8);
     expect(events).toContain('config-file.changed');
   });
@@ -226,7 +228,9 @@ describe('ConfigStore', () => {
     const events: string[] = [];
     const store = new ConfigStore({
       projectRoot,
-      onChanged: (e) => { events.push(e.type); },
+      onChanged: (e) => {
+        events.push(e.type);
+      },
     });
     await store.write(SAMPLE_GITHUB_ISSUES_CONFIG);
     expect(events).toEqual(['config-file.changed']);

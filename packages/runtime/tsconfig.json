@@ -12,6 +12,8 @@
     { "path": "../core" },
     { "path": "../harness" },
     { "path": "../runtime-store-sqlite" },
+    { "path": "../scm" },
+    { "path": "../tracker" },
     { "path": "../workflow-engine" }
   ]
 }
