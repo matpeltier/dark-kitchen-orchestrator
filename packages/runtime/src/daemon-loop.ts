@@ -6,8 +6,26 @@
  * This is the glue layer that connects all the packages together.
  */
 
-import type { Task, TaskDependency, TaskId, ProjectId, RunId } from '@dark-kitchen/core';
+import type {
+  Task,
+  TaskDependency,
+  TaskId,
+  ProjectId,
+  RunId,
+  InterventionKind,
+} from '@dark-kitchen/core';
 import { createRunId } from '@dark-kitchen/core';
+
+function classifyInterventionKind(summary: string): InterventionKind {
+  const lower = summary.toLowerCase();
+  if (lower.includes('auth') || lower.includes('unauthorized') || lower.includes('api key'))
+    return 'auth';
+  if (lower.includes('quota') || lower.includes('credit') || lower.includes('billing'))
+    return 'quota';
+  if (lower.includes('rate') || lower.includes('429') || lower.includes('too many'))
+    return 'rate-limit';
+  return 'agent-failure';
+}
 import type { RunSupervisor } from './scheduler.js';
 import type { InterventionService } from './interventions.js';
 import type { PrLifecycleOrchestrator } from './pr-lifecycle.js';
@@ -106,10 +124,12 @@ export class DaemonLoop {
       const outcome = await this.deps.runWorkflowForTask(taskId, runId);
 
       if (!outcome.success) {
+        // Classify the failure kind from the error summary
+        const kind = classifyInterventionKind(outcome.summary);
         await this.deps.interventionService.create({
           scope: 'run',
           targetId: runId,
-          kind: 'agent-failure',
+          kind,
           summary: `Workflow failed for task ${taskId}: ${outcome.summary}`,
           deduplicationKey: `workflow-failure:${taskId}`,
         });

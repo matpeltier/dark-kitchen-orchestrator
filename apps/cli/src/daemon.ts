@@ -50,6 +50,7 @@ export class DarkKitchenDaemon {
   private readonly options: DaemonOptions;
   private readonly dataDir: string;
   private store?: SqliteRuntimeStore;
+  private config?: DarkKitchenConfig;
   private interventionService?: InterventionService;
   private channelGateway?: ChannelGateway;
   private daemonLoop?: DaemonLoop;
@@ -71,10 +72,9 @@ export class DarkKitchenDaemon {
     await this.acquireLock(lockPath);
 
     // 1. Load config
-    let config: DarkKitchenConfig | undefined;
     try {
       const configStore = new ConfigStore({ projectRoot: this.options.projectRoot });
-      config = await configStore.read();
+      this.config = await configStore.read();
     } catch {
       this.log(
         'warn',
@@ -91,7 +91,7 @@ export class DarkKitchenDaemon {
 
     // 4. Channel Gateway — unified-channel (Telegram, Discord, Slack, iMessage, WhatsApp)
     this.channelGateway = new ChannelGateway();
-    const configuredChannels = config?.channels ?? [];
+    const configuredChannels = this.config?.channels ?? [];
     const ucChannels = configuredChannels
       .filter((ch) => ['telegram', 'discord', 'slack', 'imessage', 'whatsapp'].includes(ch.kind))
       .map((ch) => {
@@ -120,21 +120,21 @@ export class DarkKitchenDaemon {
     }
 
     // 5. Tracker adapter
-    const trackerConfig = config?.trackers?.[0];
+    const trackerConfig = this.config?.trackers?.[0];
     let tracker: import('@dark-kitchen/tracker').FullTrackerAdapter | undefined;
     if (trackerConfig) {
       tracker = await this.buildTrackerAdapter(trackerConfig);
     }
 
     // 6. SCM adapter
-    const scmConfig = config?.repositories?.[0];
+    const scmConfig = this.config?.repositories?.[0];
     let scm: import('@dark-kitchen/scm').FullScmAdapter | undefined;
     if (scmConfig && scmConfig.kind === 'github') {
       scm = await this.buildScmAdapter(scmConfig);
     }
 
     // 7. Harness runtime (acpx)
-    const harnessProfile = config?.harnessProfiles?.find((h) => h.managed === true);
+    const harnessProfile = this.config?.harnessProfiles?.find((h) => h.managed === true);
     const roleResolver = await this.buildRoleResolver(harnessProfile);
 
     // 8. Workspace manager
@@ -152,7 +152,7 @@ export class DarkKitchenDaemon {
     const projectId = `default-project` as import('@dark-kitchen/core').ProjectId;
     const supervisor = new RunSupervisor(
       {
-        maxParallelTasks: config?.concurrency?.maxParallelTasks ?? 4,
+        maxParallelTasks: this.config?.concurrency?.maxParallelTasks ?? 4,
         projectId,
       },
       async (taskId: import('@dark-kitchen/core').TaskId) => {
@@ -173,8 +173,8 @@ export class DarkKitchenDaemon {
           projectId,
           repositoryId: repoId,
           targetBranch: scmConfig?.defaultBranch ?? 'main',
-          requiredChecks: config?.mergePolicy?.requiredChecks ?? [],
-          autoMerge: config?.mergePolicy !== undefined,
+          requiredChecks: this.config?.mergePolicy?.requiredChecks ?? [],
+          autoMerge: this.config?.mergePolicy !== undefined,
         },
         {
           supervisor,
@@ -314,24 +314,74 @@ export class DarkKitchenDaemon {
   }
 
   private async buildRoleResolver(
-    harnessProfile: NonNullable<DarkKitchenConfig['harnessProfiles']>[number] | undefined,
+    _harnessProfile: NonNullable<DarkKitchenConfig['harnessProfiles']>[number] | undefined,
   ): Promise<import('@dark-kitchen/workflow-engine').RoleResolver> {
     const { AcpxRuntimeAdapter } = await import('@dark-kitchen/harness');
+    const { RoleRouter } = await import('@dark-kitchen/harness');
 
-    const agent = harnessProfile?.managed === true ? (harnessProfile.kind ?? 'codex') : 'codex';
-    const sessionStoreDir = join(this.dataDir, 'acpx-sessions');
+    // Build a router from all configured roles so each role can have its own
+    // agent kind, model, instructions, skills, and MCP servers
+    const allProfiles = this.config?.harnessProfiles ?? [];
+    const allRoles = this.config?.roles ?? [];
 
-    const runtime = new AcpxRuntimeAdapter({
-      id: 'acpx',
-      agent,
-      sessionStoreDir,
-      permissionMode: 'auto',
-      timeoutMs: 300_000, // 5 minutes per turn
+    const router = new RoleRouter({
+      roles: allRoles.map((r) => {
+        const rd: import('@dark-kitchen/harness').RoleDefinition = {
+          roleId: r.id,
+          profileId: r.harnessProfileId,
+        };
+        if (r.overrides?.model) Object.assign(rd, { modelOverride: r.overrides.model });
+        if (r.overrides?.reasoning) Object.assign(rd, { reasoningOverride: r.overrides.reasoning });
+        if (r.overrides?.instructions)
+          Object.assign(rd, { instructionsOverride: r.overrides.instructions });
+        return rd;
+      }),
+      profiles: allProfiles as never,
+      runtimes: [],
     });
 
-    // Resolver: every role gets a real acpx call
+    // One AcpxRuntimeAdapter per unique harness profile kind
+    const runtimeCache = new Map<string, InstanceType<typeof AcpxRuntimeAdapter>>();
+
+    const getRuntime = (
+      kind: string,
+      modelOverride?: string,
+    ): InstanceType<typeof AcpxRuntimeAdapter> => {
+      const key = `${kind}:${modelOverride ?? ''}`;
+      if (!runtimeCache.has(key)) {
+        runtimeCache.set(
+          key,
+          new AcpxRuntimeAdapter({
+            id: key,
+            agent: kind,
+            sessionStoreDir: join(this.dataDir, 'acpx-sessions'),
+            permissionMode: 'auto',
+            timeoutMs: 300_000,
+          }),
+        );
+      }
+      return runtimeCache.get(key)!;
+    };
+
+    // Resolver: route each role to its configured profile/model/instructions
     return (role: string) =>
       async (input: { prompt: string; context?: Record<string, unknown> }, signal: AbortSignal) => {
+        // Resolve role → profile (falls back to default if role not in config)
+        let agent = _harnessProfile?.managed === true ? (_harnessProfile.kind ?? 'codex') : 'codex';
+        let instructions: string | undefined;
+        try {
+          const resolved = router.resolve(role);
+          if (resolved.profile.managed) agent = resolved.profile.kind ?? agent;
+          if (resolved.instructionsOverride) instructions = resolved.instructionsOverride;
+          else if (resolved.profile.managed && resolved.profile.instructions) {
+            instructions = resolved.profile.instructions;
+          }
+        } catch {
+          // Role not in config — use default
+        }
+
+        const runtime = getRuntime(agent);
+
         return new Promise<string>((resolvePromise, reject) => {
           const sessionId =
             `acpx-role-${role}-${Date.now()}` as import('@dark-kitchen/core').AgentSessionId;
@@ -364,8 +414,14 @@ export class DarkKitchenDaemon {
             profile: { managed: true, id: 'acpx', kind: agent },
             prompt: input.prompt,
           };
-          if (input.context)
-            Object.assign(sessionInput, { instructions: JSON.stringify(input.context) });
+          // Combine role instructions + context
+          const fullInstructions = [
+            instructions,
+            input.context ? `Context: ${JSON.stringify(input.context)}` : undefined,
+          ]
+            .filter(Boolean)
+            .join('\n\n');
+          if (fullInstructions) Object.assign(sessionInput, { instructions: fullInstructions });
           runtime.startSession(sessionInput).catch(reject);
         });
       };

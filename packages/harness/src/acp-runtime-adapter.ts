@@ -294,7 +294,8 @@ export class AcpxRuntimeAdapter implements HarnessRuntime {
             }
           } else if (event.type === 'error' && event.message) {
             session.state = 'failed';
-            this.emit(sessionId, { sessionId, state: 'failed', error: new Error(event.message) });
+            const err = classifyAcpError(event.message);
+            this.emit(sessionId, { sessionId, state: 'failed', error: err });
           }
         }
 
@@ -347,6 +348,45 @@ interface AcpxSession extends HarnessSession {
     events: AsyncIterable<{ type: string; text?: string; status?: string; message?: string }>;
     cancel(input?: { reason?: string }): Promise<void>;
   };
+}
+
+export type AcpErrorKind = 'auth' | 'quota' | 'rate-limit' | 'generic';
+
+export class AcpClassifiedError extends Error {
+  public readonly kind: AcpErrorKind;
+  public constructor(message: string, kind: AcpErrorKind) {
+    super(message);
+    this.name = 'AcpClassifiedError';
+    this.kind = kind;
+  }
+}
+
+/**
+ * Classifies an acpx error message into an operational category
+ * so the daemon can create the right intervention kind.
+ */
+function classifyAcpError(message: string): AcpClassifiedError {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes('auth') ||
+    lower.includes('unauthorized') ||
+    lower.includes('api key') ||
+    lower.includes('token')
+  ) {
+    return new AcpClassifiedError(message, 'auth');
+  }
+  if (
+    lower.includes('quota') ||
+    lower.includes('credit') ||
+    lower.includes('billing') ||
+    lower.includes('insufficient')
+  ) {
+    return new AcpClassifiedError(message, 'quota');
+  }
+  if (lower.includes('rate') || lower.includes('429') || lower.includes('too many')) {
+    return new AcpClassifiedError(message, 'rate-limit');
+  }
+  return new AcpClassifiedError(message, 'generic');
 }
 
 function mapAcpStatus(status: string): HarnessSessionState | undefined {
