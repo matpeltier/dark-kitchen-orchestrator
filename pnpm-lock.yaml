@@ -39,6 +39,46 @@ importers:
         specifier: workspace:*
         version: link:../../packages/core
 
+  apps/cli:
+    dependencies:
+      '@dark-kitchen/channels':
+        specifier: workspace:*
+        version: link:../../packages/channels
+      '@dark-kitchen/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@dark-kitchen/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@dark-kitchen/harness':
+        specifier: workspace:*
+        version: link:../../packages/harness
+      '@dark-kitchen/mcp':
+        specifier: workspace:*
+        version: link:../../packages/mcp
+      '@dark-kitchen/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@dark-kitchen/runtime-store-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/runtime-store-sqlite
+      '@dark-kitchen/scm':
+        specifier: workspace:*
+        version: link:../../packages/scm
+      '@dark-kitchen/tracker':
+        specifier: workspace:*
+        version: link:../../packages/tracker
+      '@dark-kitchen/workspace-manager':
+        specifier: workspace:*
+        version: link:../../packages/workspace-manager
+      js-yaml:
+        specifier: 4.1.0
+        version: 4.1.0
+    devDependencies:
+      '@types/js-yaml':
+        specifier: 4.0.9
+        version: 4.0.9
+
   packages/adapter-contract-fixture:
     dependencies:
       '@dark-kitchen/core':
