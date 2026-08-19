@@ -27,8 +27,8 @@ import {
   DaemonLoop,
   executeWorkflow,
 } from '@dark-kitchen/runtime';
-import { ChannelGateway } from '@dark-kitchen/channels';
-import { OpenClawGatewayTransport } from '@dark-kitchen/channels';
+import { ChannelGateway, UnifiedChannelTransport } from '@dark-kitchen/channels';
+import type { UnifiedChannelConfig } from '@dark-kitchen/channels';
 import { ConfigStore } from '@dark-kitchen/config';
 import type { DarkKitchenConfig } from '@dark-kitchen/config';
 
@@ -89,33 +89,34 @@ export class DarkKitchenDaemon {
     // 3. Intervention service
     this.interventionService = new InterventionService(this.store);
 
-    // 4. Channel Gateway (OpenClaw — optional)
+    // 4. Channel Gateway — unified-channel (Telegram, Discord, Slack, iMessage, WhatsApp)
     this.channelGateway = new ChannelGateway();
-    const openclawUrl = process.env['OPENCLAW_GATEWAY_URL'] ?? config?.channels?.[0]?.url;
-    if (openclawUrl || process.env['OPENCLAW_GATEWAY_TOKEN']) {
-      const transportConfig: import('@dark-kitchen/channels').OpenClawGatewayConfig = {
-        id: 'openclaw',
-        gatewayUrl: openclawUrl ?? 'ws://localhost:18789',
-      };
-      const gwToken = process.env['OPENCLAW_GATEWAY_TOKEN'];
-      if (gwToken) Object.assign(transportConfig, { authToken: gwToken });
-      const transport = new OpenClawGatewayTransport(transportConfig);
+    const configuredChannels = config?.channels ?? [];
+    const ucChannels = configuredChannels
+      .filter((ch) => ['telegram', 'discord', 'slack', 'imessage', 'whatsapp'].includes(ch.kind))
+      .map((ch) => {
+        const ucCfg: UnifiedChannelConfig = { kind: ch.kind as UnifiedChannelConfig['kind'] };
+        if (ch.tokenEnv) Object.assign(ucCfg, { tokenEnv: ch.tokenEnv });
+        if (ch.token2Env) Object.assign(ucCfg, { token2Env: ch.token2Env });
+        if (ch.defaultTarget) Object.assign(ucCfg, { defaultTarget: ch.defaultTarget });
+        return ucCfg;
+      });
+
+    if (ucChannels.length > 0) {
+      const transport = new UnifiedChannelTransport({ id: 'messaging', channels: ucChannels });
       this.channelGateway.addTransport(transport);
-      // Route inbound replies to interventions
+
       this.channelGateway.onInterventionReply(async (interventionId, reply) => {
         const resolveInput: Parameters<NonNullable<typeof this.interventionService>['resolve']>[0] =
-          {
-            interventionId,
-            action: 'free-text',
-            answer: reply.body,
-          };
+          { interventionId, action: 'free-text', answer: reply.body };
         if (reply.senderId) Object.assign(resolveInput, { resolvedBy: reply.senderId });
         await this.interventionService?.resolve(resolveInput);
       });
-      // Connect to OpenClaw Gateway (non-blocking)
-      transport.connect().catch((err: unknown) => {
-        this.log('warn', `OpenClaw Gateway connection failed: ${String(err)}`);
+
+      transport.start().catch((err: unknown) => {
+        this.log('warn', `Channel transport start failed: ${String(err)}`);
       });
+      this.log('info', `Channels: ${ucChannels.map((c) => c.kind).join(', ')}`);
     }
 
     // 5. Tracker adapter

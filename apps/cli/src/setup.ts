@@ -118,16 +118,46 @@ export async function runSetup(projectRoot: string): Promise<void> {
     print('Available ACP agents: codex, claude-code, gemini-cli');
     const agentKind = (await rl.question('Agent type [codex]: ')).trim() || 'codex';
 
-    print('\n── Optional: OpenClaw Gateway (for Telegram/iMessage/WhatsApp/Slack) ──');
-    print("Skip this if you don't use OpenClaw. Interventions will be logged to console.");
-    const useOpenclaw =
-      (await rl.question('Connect to OpenClaw Gateway? [y/N]: ')).toLowerCase() === 'y';
-    let openclawUrl = '';
-    if (useOpenclaw) {
-      openclawUrl =
-        (await rl.question('OpenClaw Gateway URL [ws://localhost:18789]: ')).trim() ||
-        'ws://localhost:18789';
-      print('Set OPENCLAW_GATEWAY_TOKEN env var if your Gateway requires auth.');
+    print('\n── Messaging channel for notifications (optional) ──────────────────');
+    print('Dark Kitchen can notify you and accept replies via messaging.');
+    print('Options: telegram, discord, slack, imessage (macOS only), none');
+    const channelKind = (await rl.question('Channel [none]: ')).trim().toLowerCase() || 'none';
+
+    let channelConfig: NonNullable<DarkKitchenConfig['channels']> = [];
+    if (channelKind === 'telegram') {
+      print('  Create a bot via @BotFather → copy the token');
+      const tokenEnv =
+        (await rl.question('  Env var for bot token [TELEGRAM_BOT_TOKEN]: ')).trim() ||
+        'TELEGRAM_BOT_TOKEN';
+      const defaultTarget = (
+        await rl.question(
+          '  Your Telegram chat ID (run: curl https://api.telegram.org/bot$TOKEN/getUpdates): ',
+        )
+      ).trim();
+      channelConfig = [{ id: 'telegram', kind: 'telegram', tokenEnv, defaultTarget }];
+    } else if (channelKind === 'discord') {
+      print('  Create a bot at discord.com/developers → invite to server');
+      const tokenEnv =
+        (await rl.question('  Env var for bot token [DISCORD_BOT_TOKEN]: ')).trim() ||
+        'DISCORD_BOT_TOKEN';
+      const defaultTarget = (
+        await rl.question('  Channel ID (right-click channel → Copy ID): ')
+      ).trim();
+      channelConfig = [{ id: 'discord', kind: 'discord', tokenEnv, defaultTarget }];
+    } else if (channelKind === 'slack') {
+      print('  Create a Slack app with Socket Mode enabled at api.slack.com/apps');
+      const tokenEnv =
+        (await rl.question('  Env var for bot token [SLACK_BOT_TOKEN]: ')).trim() ||
+        'SLACK_BOT_TOKEN';
+      const token2Env =
+        (await rl.question('  Env var for app token [SLACK_APP_TOKEN]: ')).trim() ||
+        'SLACK_APP_TOKEN';
+      const defaultTarget = (await rl.question('  Channel ID: ')).trim();
+      channelConfig = [{ id: 'slack', kind: 'slack', tokenEnv, token2Env, defaultTarget }];
+    } else if (channelKind === 'imessage') {
+      print('  macOS only — no token needed');
+      const defaultTarget = (await rl.question('  Your iMessage handle (phone or email): ')).trim();
+      channelConfig = [{ id: 'imessage', kind: 'imessage', defaultTarget }];
     }
 
     print('\n── Merge policy ────────────────────────────────────────────────');
@@ -178,18 +208,7 @@ export async function runSetup(projectRoot: string): Promise<void> {
             },
           }
         : {}),
-      ...(useOpenclaw && openclawUrl
-        ? {
-            channels: [
-              {
-                id: 'openclaw',
-                kind: 'openclaw' as never,
-                url: openclawUrl,
-                tokenEnv: 'OPENCLAW_GATEWAY_TOKEN',
-              },
-            ],
-          }
-        : {}),
+      ...(channelConfig.length > 0 ? { channels: channelConfig } : {}),
     };
 
     // ── 7. Write config ──────────────────────────────────────────────────────
@@ -200,10 +219,15 @@ export async function runSetup(projectRoot: string): Promise<void> {
     // ── 8. Write .env.example ────────────────────────────────────────────────
     const envExample = [
       '# Dark Kitchen — copy to .env and fill in values',
-      `GITHUB_TOKEN=ghp_...`,
+      'GITHUB_TOKEN=ghp_...',
       trackerKind === 'linear' ? 'LINEAR_API_KEY=lin_api_...' : '',
       trackerKind === 'jira' ? 'JIRA_TOKEN=...\nJIRA_EMAIL=you@example.com' : '',
-      useOpenclaw ? 'OPENCLAW_GATEWAY_TOKEN=...' : '',
+      ...channelConfig.flatMap((ch) => {
+        const lines: string[] = [];
+        if (ch.tokenEnv) lines.push(`${ch.tokenEnv}=...`);
+        if (ch.token2Env) lines.push(`${ch.token2Env}=...`);
+        return lines;
+      }),
     ]
       .filter(Boolean)
       .join('\n');

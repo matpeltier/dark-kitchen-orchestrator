@@ -105,6 +105,9 @@ importers:
       '@openclaw/gateway-protocol':
         specifier: ^0.0.0
         version: 0.0.0
+      unified-channel:
+        specifier: ^0.2.0
+        version: 0.2.0(grammy@1.44.0)
 
   packages/config:
     dependencies:
@@ -2536,6 +2539,48 @@ packages:
   undici@8.5.0:
     resolution: {integrity: sha512-xamtWoB1EshgjpmlXd7GGm2VfdDtw1+rD8uhry8pSNW3If6S8E0m2T2+orSKeZXEn/aPJMviCpDBA65WJt8zhg==}
     engines: {node: '>=22.19.0'}
+
+  unified-channel@0.2.0:
+    resolution: {integrity: sha512-zD93lk4Z09fey0GrtFob3KoQkUMDdb7lM6QBIXQqLIik1rwMx4RoUy1wcefjWldn6RkvXWcLtCTC1lHkIz+Rug==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@larksuiteoapi/node-sdk': '>=1.0'
+      '@line/bot-sdk': '>=9.0'
+      '@slack/bolt': '>=3.18'
+      botbuilder: '>=4.22'
+      discord.js: '>=14.0'
+      grammy: '>=1.20'
+      irc-framework: '>=4.0'
+      matrix-bot-sdk: '>=0.7'
+      mattermost-client: '>=1.0'
+      nostr-tools: '>=2.0'
+      tmi.js: '>=1.8'
+      whatsapp-web.js: '>=1.23'
+    peerDependenciesMeta:
+      '@larksuiteoapi/node-sdk':
+        optional: true
+      '@line/bot-sdk':
+        optional: true
+      '@slack/bolt':
+        optional: true
+      botbuilder:
+        optional: true
+      discord.js:
+        optional: true
+      grammy:
+        optional: true
+      irc-framework:
+        optional: true
+      matrix-bot-sdk:
+        optional: true
+      mattermost-client:
+        optional: true
+      nostr-tools:
+        optional: true
+      tmi.js:
+        optional: true
+      whatsapp-web.js:
+        optional: true
 
   universal-user-agent@7.0.3:
     resolution: {integrity: sha512-TmnEAEAsBJVZM/AADELsK76llnwcf9vMKuPz8JflO1frO8Lchitr0fNaN9d+Ap0BjKtqWqd/J17qeDnXh8CL2A==}
@@ -4992,6 +5037,10 @@ snapshots:
   undici-types@6.20.0: {}
 
   undici@8.5.0: {}
+
+  unified-channel@0.2.0(grammy@1.44.0):
+    optionalDependencies:
+      grammy: 1.44.0
 
   universal-user-agent@7.0.3: {}
 

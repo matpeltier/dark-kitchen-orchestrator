@@ -157,12 +157,24 @@ export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
 // ─── Channels ─────────────────────────────────────────────────────────────────
 
-export const ChannelKindSchema = z.enum(['openclaw', 'slack', 'webhook']);
+export const ChannelKindSchema = z.enum([
+  'telegram',
+  'discord',
+  'slack',
+  'imessage',
+  'whatsapp',
+  'openclaw',
+  'webhook',
+]);
 export const ChannelConfigSchema = z.object({
   id: nonEmptyString,
   kind: ChannelKindSchema,
   url: nonEmptyString.optional(),
   tokenEnv: nonEmptyString.optional(),
+  /** Secondary token (e.g. SLACK_APP_TOKEN for Socket Mode). */
+  token2Env: nonEmptyString.optional(),
+  /** Default chat/user ID to send notifications to. */
+  defaultTarget: nonEmptyString.optional(),
 });
 export type ChannelConfig = z.infer<typeof ChannelConfigSchema>;
 
