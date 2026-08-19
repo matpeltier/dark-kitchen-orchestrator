@@ -18,6 +18,8 @@
     { "path": "../../packages/tracker" },
     { "path": "../../packages/scm" },
     { "path": "../../packages/channels" },
-    { "path": "../../packages/mcp" }
+    { "path": "../../packages/mcp" },
+    { "path": "../../packages/workflow-engine" },
+    { "path": "../../packages/workflows" }
   ]
 }
