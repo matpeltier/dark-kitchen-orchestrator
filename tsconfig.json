@@ -8,6 +8,9 @@
     { "path": "./packages/runtime-store-sqlite" },
     { "path": "./packages/workspace-manager" },
     { "path": "./packages/workflow-engine" },
+    { "path": "./packages/harness" },
+    { "path": "./packages/tracker" },
+    { "path": "./packages/scm" },
     { "path": "./apps/api" }
   ]
 }
