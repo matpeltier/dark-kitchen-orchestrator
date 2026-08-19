@@ -22,7 +22,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && node bundle.mjs",
+    "bundle": "node bundle.mjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
@@ -35,21 +36,10 @@
   ],
   "license": "MIT",
   "devDependencies": {
-    "@types/js-yaml": "4.0.9"
+    "@types/js-yaml": "4.0.9",
+    "esbuild": "^0.28.2"
   },
   "dependencies": {
-    "@dark-kitchen/channels": "workspace:*",
-    "@dark-kitchen/config": "workspace:*",
-    "@dark-kitchen/core": "workspace:*",
-    "@dark-kitchen/harness": "workspace:*",
-    "@dark-kitchen/mcp": "workspace:*",
-    "@dark-kitchen/runtime": "workspace:*",
-    "@dark-kitchen/runtime-store-sqlite": "workspace:*",
-    "@dark-kitchen/scm": "workspace:*",
-    "@dark-kitchen/tracker": "workspace:*",
-    "@dark-kitchen/workflow-engine": "workspace:*",
-    "@dark-kitchen/workflows": "workspace:*",
-    "@dark-kitchen/workspace-manager": "workspace:*",
     "js-yaml": "4.1.0"
   }
 }
