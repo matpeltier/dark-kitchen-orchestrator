@@ -92,9 +92,59 @@ async function main(): Promise<void> {
       break;
     }
     case 'mcp': {
-      // Start the MCP server (used when running as a Cursor/MCP server)
+      // Start the MCP server on stdio.
+      // Reads config.yaml and wires up the real tracker adapter + config.
       const { startServer } = await import('@dark-kitchen/mcp');
-      await startServer({});
+      const { ConfigStore } = await import('@dark-kitchen/config');
+      const { SqliteRuntimeStore } = await import('@dark-kitchen/runtime-store-sqlite');
+      const { InterventionService } = await import('@dark-kitchen/runtime');
+
+      let trackerAdapter;
+      let interventionService;
+      let config;
+
+      try {
+        const configStore = new ConfigStore({ projectRoot });
+        config = await configStore.read();
+
+        // Intervention service (needs SQLite store)
+        const dataDir = join(projectRoot, '.dark-kitchen', 'runtime');
+        const databasePath = join(dataDir, 'store.db');
+        try {
+          const store = await SqliteRuntimeStore.open({ databasePath });
+          interventionService = new InterventionService(store);
+        } catch {
+          // SQLite not available (daemon not started) — interventions won't work
+        }
+
+        // Tracker adapter
+        const trackerCfg = config.trackers?.[0];
+        if (trackerCfg) {
+          const token = trackerCfg.tokenEnv ? (process.env[trackerCfg.tokenEnv] ?? '') : '';
+          if (trackerCfg.kind === 'github-issues') {
+            const { GitHubIssuesAdapter } = await import('@dark-kitchen/tracker');
+            trackerAdapter = new GitHubIssuesAdapter({
+              owner: trackerCfg.owner ?? '',
+              repo: trackerCfg.repo ?? '',
+              token,
+            });
+          } else if (trackerCfg.kind === 'linear') {
+            const { LinearTrackerAdapter } = await import('@dark-kitchen/tracker');
+            const linConfig = { apiKey: token };
+            if (trackerCfg.workspace) Object.assign(linConfig, { teamKey: trackerCfg.workspace });
+            trackerAdapter = new LinearTrackerAdapter(linConfig);
+          }
+        }
+      } catch (err) {
+        // No config — MCP starts with empty context
+        process.stderr.write(`[MCP] Warning: ${String(err)}\n`);
+      }
+
+      const mcpCtx: import('@dark-kitchen/mcp').McpContext = {};
+      if (trackerAdapter) Object.assign(mcpCtx, { tracker: trackerAdapter });
+      if (config) Object.assign(mcpCtx, { config });
+      if (interventionService) Object.assign(mcpCtx, { interventionService });
+      await startServer(mcpCtx);
       break;
     }
     default: {
