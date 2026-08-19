@@ -105,9 +105,14 @@ export class DaemonLoop {
 
     try {
       const { tasks, dependencies } = await this.deps.getTaskGraph();
+      const ready = tasks.filter((t) => t.status === 'backlog' || t.status === 'ready');
+      process.stderr.write(
+        `[DaemonLoop] tick — ${tasks.length} tasks, ${ready.length} ready, ${this.activeTasks.size} active\n`,
+      );
       const newTaskIds = await this.deps.supervisor.tick(tasks, dependencies);
 
       for (const taskId of newTaskIds) {
+        process.stderr.write(`[DaemonLoop] launching task ${taskId}\n`);
         void this.runTask(taskId);
       }
     } catch (err) {
