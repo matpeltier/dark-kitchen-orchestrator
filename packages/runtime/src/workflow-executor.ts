@@ -9,6 +9,8 @@
  *   4. Real agent calls routed via the RoleRouter → AcpxRuntimeAdapter
  */
 
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { TaskId, RunId } from '@dark-kitchen/core';
 import { createProjectId, createRepositoryId } from '@dark-kitchen/core';
 import { runWorkflow, type RoleResolver } from '@dark-kitchen/workflow-engine';
@@ -71,11 +73,26 @@ export async function executeWorkflow(
   const journal = new SqliteDurableJournal(journalPath, runId);
 
   try {
-    // 3. Run workflow with real agent resolver
+    // 3. Read AGENTS.md from the worktree for additional context injection
+    const agentsMd = await readAgentsMd(workspace.path);
+
+    // Wrap the resolver to inject AGENTS.md instructions into every role
+    const resolverWithAgentsMd: typeof deps.roleResolver = agentsMd
+      ? (role) => {
+          const inner = deps.roleResolver(role);
+          return async (input, signal) => {
+            // Prepend AGENTS.md to the prompt as context
+            const augmented = { ...input, prompt: `${agentsMd}\n\n---\n\n${input.prompt}` };
+            return inner(augmented, signal);
+          };
+        }
+      : deps.roleResolver;
+
+    // 4. Run workflow with real agent resolver
     const result = await runWorkflow(deps.workflow, {
       runId,
       journal,
-      resolver: deps.roleResolver,
+      resolver: resolverWithAgentsMd,
     });
 
     // 4. Get current branch from worktree
@@ -100,6 +117,26 @@ export async function executeWorkflow(
   } finally {
     journal.close();
   }
+}
+
+/**
+ * Read AGENTS.md (or .dark-kitchen/AGENTS.md) from the worktree.
+ * Returns null if neither file exists.
+ */
+async function readAgentsMd(worktreePath: string): Promise<string | null> {
+  const candidates = [
+    join(worktreePath, '.dark-kitchen', 'AGENTS.md'),
+    join(worktreePath, 'AGENTS.md'),
+    join(worktreePath, '.github', 'AGENTS.md'),
+  ];
+  for (const path of candidates) {
+    try {
+      return await readFile(path, 'utf8');
+    } catch {
+      // try next
+    }
+  }
+  return null;
 }
 
 async function getCurrentBranch(worktreePath: string): Promise<string> {

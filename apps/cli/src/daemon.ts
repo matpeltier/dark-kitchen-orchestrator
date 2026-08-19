@@ -26,6 +26,8 @@ import {
   PrLifecycleOrchestrator,
   DaemonLoop,
   executeWorkflow,
+  ADEBridge,
+  SseDashboardAdapter,
 } from '@dark-kitchen/runtime';
 import { ChannelGateway, UnifiedChannelTransport } from '@dark-kitchen/channels';
 import type { UnifiedChannelConfig } from '@dark-kitchen/channels';
@@ -51,6 +53,8 @@ export class DarkKitchenDaemon {
   private readonly dataDir: string;
   private store?: SqliteRuntimeStore;
   private config?: DarkKitchenConfig;
+  private adeBridge?: ADEBridge;
+  public dashboardPort?: number;
   private interventionService?: InterventionService;
   private channelGateway?: ChannelGateway;
   private daemonLoop?: DaemonLoop;
@@ -88,6 +92,16 @@ export class DarkKitchenDaemon {
 
     // 3. Intervention service
     this.interventionService = new InterventionService(this.store);
+
+    // 3b. ADE Bridge — start SSE dashboard on port 18800 (unless disabled)
+    if (!process.env['DK_NO_DASHBOARD']) {
+      const port = parseInt(process.env['DK_DASHBOARD_PORT'] ?? '18800', 10);
+      this.adeBridge = new ADEBridge();
+      const dashboard = new SseDashboardAdapter({ port });
+      this.adeBridge.register(dashboard);
+      dashboard.start();
+      this.dashboardPort = port;
+    }
 
     // 4. Channel Gateway — unified-channel (Telegram, Discord, Slack, iMessage, WhatsApp)
     this.channelGateway = new ChannelGateway();
@@ -245,6 +259,7 @@ export class DarkKitchenDaemon {
 
     this.daemonLoop?.stop();
     this.channelGateway?.destroy();
+    await this.adeBridge?.destroy();
     this.store?.close();
 
     for (const cb of this.shutdownCallbacks) await cb();
@@ -343,11 +358,20 @@ export class DarkKitchenDaemon {
     // One AcpxRuntimeAdapter per unique harness profile kind
     const runtimeCache = new Map<string, InstanceType<typeof AcpxRuntimeAdapter>>();
 
+    // Build MCP servers list from config for injection into acpx sessions
+    const configMcpServers = (this.config?.harnessProfiles ?? [])
+      .flatMap((p) => (p.managed ? (p.mcpServers ?? []) : []))
+      .map((name) => ({ name, url: name, type: 'http' as const }));
+
     const getRuntime = (
       kind: string,
-      modelOverride?: string,
+      profileMcpServers?: readonly string[],
     ): InstanceType<typeof AcpxRuntimeAdapter> => {
-      const key = `${kind}:${modelOverride ?? ''}`;
+      const mcpServers = [
+        ...configMcpServers,
+        ...(profileMcpServers ?? []).map((s) => ({ name: s, url: s, type: 'http' as const })),
+      ];
+      const key = `${kind}:${mcpServers.map((s) => s.name).join(',')}`;
       if (!runtimeCache.has(key)) {
         runtimeCache.set(
           key,
@@ -357,6 +381,7 @@ export class DarkKitchenDaemon {
             sessionStoreDir: join(this.dataDir, 'acpx-sessions'),
             permissionMode: 'auto',
             timeoutMs: 300_000,
+            ...(mcpServers.length > 0 ? { mcpServers } : {}),
           }),
         );
       }
@@ -380,7 +405,15 @@ export class DarkKitchenDaemon {
           // Role not in config — use default
         }
 
-        const runtime = getRuntime(agent);
+        // Find the profile's mcpServers for this role
+        const roleProfile = allProfiles.find((p) => {
+          const roleDef = allRoles.find((r) => r.id === role);
+          return roleDef && p.id === roleDef.harnessProfileId;
+        });
+        const profileMcpServers =
+          roleProfile?.managed === true ? (roleProfile.mcpServers ?? []) : [];
+
+        const runtime = getRuntime(agent, profileMcpServers);
 
         return new Promise<string>((resolvePromise, reject) => {
           const sessionId =

@@ -55,6 +55,26 @@ async function main(): Promise<void> {
       await cmdInterventions();
       break;
     }
+    case 'dashboard': {
+      // Open the live dashboard in the default browser
+      const port = args[1] ? parseInt(args[1], 10) : 18800;
+      const url = `http://localhost:${port}`;
+      print(`Dark Kitchen live dashboard: ${url}`);
+      // Try to open in browser
+      try {
+        const { execSync } = await import('node:child_process');
+        const open =
+          process.platform === 'darwin'
+            ? 'open'
+            : process.platform === 'win32'
+              ? 'start'
+              : 'xdg-open';
+        execSync(`${open} ${url}`, { stdio: 'ignore' });
+      } catch {
+        print('Could not open browser automatically. Open the URL above manually.');
+      }
+      break;
+    }
     case 'runs': {
       print('Runs command — connect to daemon runtime store for live data.');
       break;
@@ -136,6 +156,9 @@ async function cmdStart(): Promise<void> {
   try {
     await daemon.start();
     print('Dark Kitchen daemon started.');
+    if (daemon.dashboardPort) {
+      print(`Live dashboard: http://localhost:${daemon.dashboardPort}`);
+    }
     if (args.includes('--foreground')) {
       print('Running in foreground. Press Ctrl+C to stop.');
       await new Promise<void>((resolve) => {
@@ -245,9 +268,10 @@ Getting started (one command):
 Commands:
   setup             Interactive setup wizard (installs deps, creates config)
   init              Create .dark-kitchen/config.yaml from a template (non-interactive)
-  start             Start the Dark Kitchen daemon
+  start             Start the Dark Kitchen daemon (+ live dashboard on :18800)
   stop              Stop the running daemon
   status            Show daemon status
+  dashboard [port]  Open the live agent progress dashboard in browser
   doctor            Check system health and dependencies
   logs              Stream daemon logs (daemon must be running with --foreground)
   config get        Print current configuration

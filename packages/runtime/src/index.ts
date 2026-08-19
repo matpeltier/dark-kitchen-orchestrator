@@ -11,3 +11,4 @@ export type {
   WorkflowExecutorResult,
 } from './workflow-executor.js';
 export { executeWorkflow } from './workflow-executor.js';
+export * from './ade-bridge.js';

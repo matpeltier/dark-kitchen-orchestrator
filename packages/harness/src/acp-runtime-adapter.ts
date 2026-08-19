@@ -32,7 +32,7 @@ type AcpxRuntime = {
     mode: 'persistent' | 'oneshot';
     cwd?: string;
     sessionOptions?: {
-      systemPrompt?: { type: 'text'; text: string };
+      systemPrompt?: { type: 'text'; text: string } | { append: string };
     };
   }): Promise<{ sessionKey: string; backend: string; runtimeSessionName: string; cwd?: string }>;
   startTurn(input: {
@@ -60,6 +60,13 @@ type AcpxRuntime = {
   }>;
 };
 
+export interface AcpMcpServerConfig {
+  readonly name: string;
+  readonly url: string;
+  /** 'http' (default), 'sse', or 'acp' */
+  readonly type?: 'http' | 'sse' | 'acp';
+}
+
 export interface AcpxRuntimeAdapterConfig {
   readonly id: string;
   /**
@@ -75,10 +82,14 @@ export interface AcpxRuntimeAdapterConfig {
   /**
    * Permission mode for the acpx runtime.
    * 'auto' = auto-approve all tool calls (for autonomous runs).
-   * 'interactive' = ask for permission (not suitable for daemon use).
    */
   readonly permissionMode?: 'auto' | 'manual' | 'interactive';
   readonly timeoutMs?: number;
+  /**
+   * MCP servers to inject into every acpx session.
+   * Maps directly to `AcpRuntimeOptions.mcpServers`.
+   */
+  readonly mcpServers?: readonly AcpMcpServerConfig[];
 }
 
 const ACPX_CAPABILITIES: HarnessCapability[] = [
@@ -130,12 +141,19 @@ export class AcpxRuntimeAdapter implements HarnessRuntime {
     const sessionStore = createRuntimeStore({ stateDir });
     const agentRegistry = createAgentRegistry();
 
+    const mcpServers = (this.config.mcpServers ?? []).map((s) => ({
+      type: s.type ?? 'http',
+      name: s.name,
+      url: s.url,
+    }));
+
     this.runtime = createAcpRuntime({
       cwd: process.cwd(),
       sessionStore,
       agentRegistry,
       permissionMode: (this.config.permissionMode ?? 'auto') as never,
       timeoutMs: this.config.timeoutMs ?? 120_000,
+      ...(mcpServers.length > 0 ? { mcpServers } : {}),
     } as never) as unknown as AcpxRuntime;
 
     return this.runtime;
@@ -156,7 +174,8 @@ export class AcpxRuntimeAdapter implements HarnessRuntime {
       ...(input.instructions
         ? {
             sessionOptions: {
-              systemPrompt: { type: 'text', text: input.instructions },
+              // 'append' mode: preserves the agent's built-in system prompt and appends ours
+              systemPrompt: { append: input.instructions },
             },
           }
         : {}),
