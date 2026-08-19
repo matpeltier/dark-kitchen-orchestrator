@@ -165,7 +165,7 @@ export class SseDashboardAdapter implements AdeAdapter {
 
   public start(): void {
     const port = this.options.port ?? 18800;
-    const host = this.options.host ?? '127.0.0.1';
+    const host = this.options.host ?? '0.0.0.0';
 
     this.server = createServer((req, res) => {
       const url = req.url ?? '/';
@@ -441,7 +441,7 @@ function buildDashboardHtml(port: number): string {
   }
 
   function connect() {
-    const es = new EventSource('http://localhost:${port}/events');
+    const es = new EventSource('/events');
     es.onopen = () => { badge.textContent = 'live'; badge.className = 'badge'; };
     es.onerror = () => { badge.textContent = 'disconnected'; badge.className = 'badge disconnected'; setTimeout(connect, 3000); };
     es.onmessage = (e) => { try { addEvent(JSON.parse(e.data)); } catch {} };
