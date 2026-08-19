@@ -13,6 +13,7 @@
     { "path": "./packages/scm" },
     { "path": "./packages/runtime" },
     { "path": "./packages/channels" },
+    { "path": "./packages/mcp" },
     { "path": "./apps/api" }
   ]
 }

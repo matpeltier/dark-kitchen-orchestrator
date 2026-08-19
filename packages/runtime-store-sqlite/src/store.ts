@@ -68,7 +68,8 @@ export class SqliteRuntimeStore implements RuntimeStore {
     }
     // Use createRequire to bypass Vite/vitest module resolution for node:sqlite
     // (experimental built-in not recognized by Vite's resolver).
-    const { createRequire } = await import('node:module');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { createRequire } = (await import('node:module')) as any;
     const req = createRequire(import.meta.url);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { DatabaseSync: DS } = req('node:sqlite') as { DatabaseSync: new (path: string) => DatabaseSync };
