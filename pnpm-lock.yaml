@@ -45,6 +45,15 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/channels:
+    dependencies:
+      '@dark-kitchen/core':
+        specifier: workspace:*
+        version: link:../core
+      '@dark-kitchen/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
   packages/config:
     dependencies:
       '@dark-kitchen/core':
@@ -73,6 +82,21 @@ importers:
         version: link:../process-execution
 
   packages/process-execution: {}
+
+  packages/runtime:
+    dependencies:
+      '@dark-kitchen/core':
+        specifier: workspace:*
+        version: link:../core
+      '@dark-kitchen/harness':
+        specifier: workspace:*
+        version: link:../harness
+      '@dark-kitchen/runtime-store-sqlite':
+        specifier: workspace:*
+        version: link:../runtime-store-sqlite
+      '@dark-kitchen/workflow-engine':
+        specifier: workspace:*
+        version: link:../workflow-engine
 
   packages/runtime-store-sqlite:
     dependencies:

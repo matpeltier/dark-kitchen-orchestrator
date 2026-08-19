@@ -11,6 +11,8 @@
     { "path": "./packages/harness" },
     { "path": "./packages/tracker" },
     { "path": "./packages/scm" },
+    { "path": "./packages/runtime" },
+    { "path": "./packages/channels" },
     { "path": "./apps/api" }
   ]
 }
