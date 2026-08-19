@@ -67,11 +67,14 @@ export type HarnessEventHandler = (event: HarnessSessionEvent) => void;
 export interface StartSessionInput {
   readonly runId: RunId;
   readonly taskId: TaskId;
+  /** Path to the task's git worktree. Used as cwd for the agent. */
   readonly workspaceId: WorkspaceId;
   readonly profile: HarnessProfile;
+  /** Initial prompt to send when the session starts. */
   readonly prompt: string;
   readonly model?: string;
   readonly reasoning?: string;
+  /** System-level instructions injected at session creation time. */
   readonly instructions?: string;
 }
 

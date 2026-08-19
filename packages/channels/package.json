@@ -15,6 +15,9 @@
   },
   "dependencies": {
     "@dark-kitchen/core": "workspace:*",
-    "@dark-kitchen/runtime": "workspace:*"
+    "@dark-kitchen/runtime": "workspace:*",
+    "@openclaw/gateway-client": "^0.0.0",
+    "@openclaw/gateway-protocol": "^0.0.0",
+    "unified-channel": "^0.2.0"
   }
 }

@@ -10,8 +10,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DarkKitchenDaemon } from './daemon.js';
 import { runDoctor, formatDoctorReport } from './doctor.js';
-import { SAMPLE_GITHUB_ISSUES_CONFIG } from '@dark-kitchen/config';
-import { dump as yamlDump } from 'js-yaml';
+import { runSetup } from './setup.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -19,6 +18,11 @@ const projectRoot = resolve(process.cwd());
 
 async function main(): Promise<void> {
   switch (command) {
+    case 'setup': {
+      // Full interactive setup: installs acpx, creates config, runs doctor
+      await runSetup(projectRoot);
+      break;
+    }
     case 'init': {
       await cmdInit();
       break;
@@ -51,6 +55,26 @@ async function main(): Promise<void> {
       await cmdInterventions();
       break;
     }
+    case 'dashboard': {
+      // Open the live dashboard in the default browser
+      const port = args[1] ? parseInt(args[1], 10) : 18800;
+      const url = `http://localhost:${port}`;
+      print(`Dark Kitchen live dashboard: ${url}`);
+      // Try to open in browser
+      try {
+        const { execSync } = await import('node:child_process');
+        const open =
+          process.platform === 'darwin'
+            ? 'open'
+            : process.platform === 'win32'
+              ? 'start'
+              : 'xdg-open';
+        execSync(`${open} ${url}`, { stdio: 'ignore' });
+      } catch {
+        print('Could not open browser automatically. Open the URL above manually.');
+      }
+      break;
+    }
     case 'runs': {
       print('Runs command — connect to daemon runtime store for live data.');
       break;
@@ -68,9 +92,59 @@ async function main(): Promise<void> {
       break;
     }
     case 'mcp': {
-      // Start the MCP server (used when running as a Cursor/MCP server)
+      // Start the MCP server on stdio.
+      // Reads config.yaml and wires up the real tracker adapter + config.
       const { startServer } = await import('@dark-kitchen/mcp');
-      await startServer({});
+      const { ConfigStore } = await import('@dark-kitchen/config');
+      const { SqliteRuntimeStore } = await import('@dark-kitchen/runtime-store-sqlite');
+      const { InterventionService } = await import('@dark-kitchen/runtime');
+
+      let trackerAdapter;
+      let interventionService;
+      let config;
+
+      try {
+        const configStore = new ConfigStore({ projectRoot });
+        config = await configStore.read();
+
+        // Intervention service (needs SQLite store)
+        const dataDir = join(projectRoot, '.dark-kitchen', 'runtime');
+        const databasePath = join(dataDir, 'store.db');
+        try {
+          const store = await SqliteRuntimeStore.open({ databasePath });
+          interventionService = new InterventionService(store);
+        } catch {
+          // SQLite not available (daemon not started) — interventions won't work
+        }
+
+        // Tracker adapter
+        const trackerCfg = config.trackers?.[0];
+        if (trackerCfg) {
+          const token = trackerCfg.tokenEnv ? (process.env[trackerCfg.tokenEnv] ?? '') : '';
+          if (trackerCfg.kind === 'github-issues') {
+            const { GitHubIssuesAdapter } = await import('@dark-kitchen/tracker');
+            trackerAdapter = new GitHubIssuesAdapter({
+              owner: trackerCfg.owner ?? '',
+              repo: trackerCfg.repo ?? '',
+              token,
+            });
+          } else if (trackerCfg.kind === 'linear') {
+            const { LinearTrackerAdapter } = await import('@dark-kitchen/tracker');
+            const linConfig = { apiKey: token };
+            if (trackerCfg.workspace) Object.assign(linConfig, { teamKey: trackerCfg.workspace });
+            trackerAdapter = new LinearTrackerAdapter(linConfig);
+          }
+        }
+      } catch (err) {
+        // No config — MCP starts with empty context
+        process.stderr.write(`[MCP] Warning: ${String(err)}\n`);
+      }
+
+      const mcpCtx: import('@dark-kitchen/mcp').McpContext = {};
+      if (trackerAdapter) Object.assign(mcpCtx, { tracker: trackerAdapter });
+      if (config) Object.assign(mcpCtx, { config });
+      if (interventionService) Object.assign(mcpCtx, { interventionService });
+      await startServer(mcpCtx);
       break;
     }
     default: {
@@ -89,12 +163,36 @@ async function cmdInit(): Promise<void> {
     await readFile(configPath, 'utf8');
     print('.dark-kitchen/config.yaml already exists. Use `dk config` to edit.');
   } catch {
-    const yaml = yamlDump(SAMPLE_GITHUB_ISSUES_CONFIG, { lineWidth: 120 });
-    await writeFile(configPath, yaml, 'utf8');
-    print(
-      'Created .dark-kitchen/config.yaml with a sample GitHub Issues + GitHub SCM configuration.',
-    );
-    print('Edit it to match your project before running `dk start`.');
+    const template = [
+      'version: 1',
+      'trackers:',
+      '  - id: gh-issues',
+      '    kind: github-issues',
+      '    owner: YOUR_ORG',
+      '    repo: YOUR_REPO',
+      '    tokenEnv: GITHUB_TOKEN',
+      'repositories:',
+      '  - id: main-repo',
+      '    kind: github',
+      '    owner: YOUR_ORG',
+      '    repo: YOUR_REPO',
+      '    defaultBranch: main',
+      '    tokenEnv: GITHUB_TOKEN',
+      'harnessProfiles:',
+      '  - managed: true',
+      '    id: codex',
+      '    kind: codex',
+      'roles:',
+      '  - id: implementer',
+      '    harnessProfileId: codex',
+      'workflows:',
+      '  - id: default',
+      '    file: .dark-kitchen/workflows/default.ts',
+      '    roles: [implementer]',
+    ].join('\n');
+    await writeFile(configPath, template + '\n', 'utf8');
+    print('Created .dark-kitchen/config.yaml — edit YOUR_ORG and YOUR_REPO.');
+    print('For interactive setup, run: dk setup');
   }
 }
 
@@ -108,6 +206,9 @@ async function cmdStart(): Promise<void> {
   try {
     await daemon.start();
     print('Dark Kitchen daemon started.');
+    if (daemon.dashboardPort) {
+      print(`Live dashboard: http://localhost:${daemon.dashboardPort}`);
+    }
     if (args.includes('--foreground')) {
       print('Running in foreground. Press Ctrl+C to stop.');
       await new Promise<void>((resolve) => {
@@ -206,28 +307,40 @@ function printErr(msg: string): void {
 
 function printHelp(): void {
   print(`
-Dark Kitchen CLI
+Dark Kitchen — autonomous coding agent control plane
 
 Usage: dk <command> [options]
+       npx dark-kitchen <command>
+
+Getting started (one command):
+  dk setup          Interactive setup: installs acpx, creates config, runs doctor
 
 Commands:
-  init              Create .dark-kitchen/config.yaml from a sample template
-  start             Start the Dark Kitchen daemon
+  setup             Interactive setup wizard (installs deps, creates config)
+  init              Create .dark-kitchen/config.yaml from a template (non-interactive)
+  start             Start the Dark Kitchen daemon (+ live dashboard on :18800)
   stop              Stop the running daemon
   status            Show daemon status
+  dashboard [port]  Open the live agent progress dashboard in browser
   doctor            Check system health and dependencies
-  logs              Stream daemon logs
+  logs              Stream daemon logs (daemon must be running with --foreground)
   config get        Print current configuration
   runs              List active/recent runs
   agents            List agent sessions
   interventions     List open interventions
   capabilities      list | ensure <id>
   cleanup           Remove released worktrees and stale data
-  mcp               Start as an MCP server (stdio)
+  mcp               Start as an MCP server on stdio (for Cursor integration)
 
 Options:
-  --foreground      Run daemon in foreground (default: background)
+  --foreground      Run daemon in foreground (Ctrl+C to stop)
   --json            Use JSON log format
+
+Examples:
+  dk setup                        # First-time setup
+  export GITHUB_TOKEN=ghp_...
+  dk start --foreground           # Start and see logs
+  dk doctor                       # Check health at any time
 `);
 }
 

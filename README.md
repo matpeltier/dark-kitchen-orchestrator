@@ -1,104 +1,165 @@
-# Dark Kitchen
+# Dark Kitchen 🍳
 
 **Dark Kitchen** is a standalone TypeScript control plane for autonomous software teams.
 
-It connects a PM-facing work tracker (GitHub Issues, Linear, or Jira) with one or more coding agents, a Git/GitHub source-control pipeline, and optional human-in-the-loop channels — without coupling any of those pieces to each other.
+It connects a work tracker (GitHub Issues, Linear, or Jira) with coding agents (Cursor/Claude Code/Codex/Gemini), a GitHub SCM pipeline, and optional human-in-the-loop messaging — all from a single CLI.
 
-## What it does
+---
 
-1. **PM plans work** through Dark Kitchen MCP. Tasks get native blocker dependencies, optional verification requirements, and autonomous approval.
-2. **Dark Kitchen schedules ready tasks** in parallel (up to a configurable limit), creating one Git worktree per task.
-3. **Coding agents** (Cursor/Claude Code/Gemini CLI/DeepSeek/custom) implement and review the task in the worktree.
-4. **Dark Kitchen owns the SCM lifecycle**: push branch → open PR → wait for CI → merge → close tracker task → release worktree.
-5. **Verification runs** (Playwright/Maestro/HTTP/command) enforce observable acceptance criteria before merge when the task requests it.
-6. **Human interventions** are routed through OpenClaw (Telegram, WhatsApp, Discord, Slack) or direct channel replies — the PM never needs to open an agent terminal.
+## Getting started in 5 minutes
 
-## Architecture
-
-```
-PM (ChatGPT / Claude / other)
-       │
-       ▼  Dark Kitchen MCP
-┌─────────────────────────────────────┐
-│  Dark Kitchen Control Plane         │
-│                                     │
-│  Tracker  ──►  Scheduler  ──►  SCM  │
-│  Adapter       (tasks)      Adapter │
-│                   │                 │
-│              Workflow Engine        │
-│                   │                 │
-│          ┌────────┼────────┐        │
-│          ▼        ▼        ▼        │
-│       Harness  Verifier  Channels   │
-│       Runtime  Runtime   (OpenClaw) │
-└─────────────────────────────────────┘
-         ▼                 ▲
-    Git Worktrees    Human Replies
-    (one per task)
-```
-
-**Core invariant**: one active task = one primary Git worktree. Worktrees are never shared between active tasks.
-
-**Role ≠ Harness ≠ Model**: Workflow code references semantic roles (`implementer`, `reviewer`, `verifier`). Harness profiles and models live in `.dark-kitchen/config.yaml`. The workflow engine never hard-codes a vendor name.
-
-## Features
-
-- **Multi-tracker**: GitHub Issues, Linear, Jira — normalized task graph with native blocker relationships
-- **Multi-harness**: ACP/acpx (Cursor/Claude Code/Gemini CLI), DeepSeek Harness, and custom native adapters
-- **Durable workflows**: SQLite-backed journal; completed agent calls replay on restart, never re-execute
-- **Parallel execution**: task graph scheduler with configurable concurrency
-- **First-class verification**: Playwright, Maestro, HTTP, and command-exec providers with bounded fix/reverify loops
-- **Human-in-the-loop**: OpenClaw bidirectional channel gateway for Telegram/WhatsApp/Discord/Slack
-- **MCP control surface**: full PM tooling via MCP server
-- **Capability provisioning**: managed providers install into Dark Kitchen-owned storage with explicit approval
-- **Security**: secrets never in config/logs, plugin allowlisting, path sanitization, policy gates for destructive actions
-
-## Status
-
-Active development. Core packages (config, runtime store, workspace manager, workflow engine, tracker/SCM adapters, harness, channels, MCP, CLI, verification) are implemented and tested.
-
-## Prerequisites
-
-- Node.js >= 22.13
-- pnpm >= 10.14
-- Git >= 2.5
-- acpx (for ACP harnesses)
-- GITHUB_TOKEN / LINEAR_API_KEY / JIRA_TOKEN (for tracker/SCM)
-
-## Quick Start
+### 1. Install and configure
 
 ```sh
-# Install
-npm install -g dark-kitchen
-
-# Initialize a project
-cd your-project
-dark-kitchen init
-
-# Edit .dark-kitchen/config.yaml to match your project
-# Then start the daemon
-dark-kitchen start --foreground
-
-# Check health
-dark-kitchen doctor
+npx dark-kitchen setup
 ```
 
-## Configuration
+The wizard:
 
-Dark Kitchen is configured in `.dark-kitchen/config.yaml`:
+- Checks Node 22+ and git
+- Installs `acpx` globally if missing (the agent runtime)
+- Asks: tracker type, GitHub org/repo, coding agent, messaging channel (optional), merge policy
+- Writes `.dark-kitchen/config.yaml`
+- Runs `doctor` to confirm everything is healthy
 
-### GitHub Issues + GitHub SCM
+### 2. Set your credentials
+
+```sh
+export GITHUB_TOKEN=ghp_...          # GitHub Issues + SCM
+export TELEGRAM_BOT_TOKEN=...        # optional: for notifications
+```
+
+Or create `.dark-kitchen/.env` (never committed — it's gitignored by `dk setup`).
+
+### 3. Start the daemon
+
+```sh
+dk start --foreground
+```
+
+Output:
+
+```
+[INFO] Daemon started {"pid":12345}
+[ADE] Dashboard: http://localhost:18800
+[INFO] Channels: telegram
+```
+
+### 4. Open the live dashboard
+
+```sh
+dk dashboard
+# → opens http://localhost:18800 in your browser
+```
+
+You'll see each agent's steps, roles, outputs, and interventions in real time.
+
+### 5. Create tasks and let Dark Kitchen run them
+
+In GitHub Issues, add the label `dk:ready` to any issue you want automated.
+
+Dark Kitchen will:
+
+1. Detect the task
+2. Create an isolated git worktree
+3. Launch the coding agent in the worktree
+4. Open a PR, wait for CI, merge, close the issue
+5. Notify you on Telegram/Discord/iMessage if intervention needed
+
+---
+
+## Connect Cursor/ChatGPT as PM
+
+Dark Kitchen exposes an MCP server for PM-level task management. Configure it once and use it from any MCP-compatible client.
+
+### In Cursor
+
+Add to your project's `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "dark-kitchen": {
+      "command": "node",
+      "args": ["--experimental-sqlite", "/path/to/your-project/node_modules/.bin/dk", "mcp"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Or if `dk` is installed globally:
+
+```json
+{
+  "mcpServers": {
+    "dark-kitchen": {
+      "command": "dk",
+      "args": ["mcp"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+### In ChatGPT (custom GPT or Projects)
+
+1. Start the MCP server as an HTTP proxy (requires an MCP-to-HTTP bridge like `mcpx-proxy` or similar)
+2. Or use the **PM skill** directly:
+
+### PM skill
+
+Copy `skills/dark-kitchen-pm/SKILL.md` into your custom GPT instructions or ChatGPT Project instructions. This teaches the PM to:
+
+- Create and manage tasks through Dark Kitchen MCP (`dk_*` tools)
+- Set native dependency edges (never `Depends on #...` text)
+- Configure verification profiles for tasks that need runtime proof
+- Inspect capability state and provision managed capabilities safely
+
+### Available MCP tools
+
+| Category     | Tool                                 | What it does                                 |
+| ------------ | ------------------------------------ | -------------------------------------------- |
+| Tracker      | `dk_list_tasks`                      | List all tasks in the project                |
+| Tracker      | `dk_create_task`                     | Create a new task                            |
+| Tracker      | `dk_update_task`                     | Update title, description, status            |
+| Tracker      | `dk_close_task`                      | Close/complete a task                        |
+| Tracker      | `dk_add_comment`                     | Add a comment to a task                      |
+| Tracker      | `dk_add_dependency`                  | Add a native blocker edge (validates cycles) |
+| Tracker      | `dk_remove_dependency`               | Remove a dependency                          |
+| Tracker      | `dk_list_dependencies`               | List dependencies for a task                 |
+| Config       | `dk_get_config`                      | Read current `.dark-kitchen/config.yaml`     |
+| Config       | `dk_validate_config`                 | Validate a config object                     |
+| Runtime      | `dk_list_interventions`              | List open interventions                      |
+| Runtime      | `dk_get_intervention`                | Get intervention details                     |
+| Runtime      | `dk_resolve_intervention`            | Resolve with retry/approve/stop/free-text    |
+| Runtime      | `dk_dismiss_intervention`            | Dismiss a non-critical intervention          |
+| Capabilities | `dk_list_capabilities`               | List configured capability providers         |
+| Capabilities | `dk_inspect_capability`              | Inspect a capability state                   |
+| Capabilities | `dk_request_capability_provisioning` | Plan + approve capability install            |
+
+---
+
+## Configuration reference
 
 ```yaml
+# .dark-kitchen/config.yaml
+
 version: 1
 
+# ── Tracker ──────────────────────────────────────────────────────
 trackers:
   - id: gh-issues
-    kind: github-issues
+    kind: github-issues # github-issues | linear | jira
     owner: my-org
     repo: my-repo
     tokenEnv: GITHUB_TOKEN
 
+# ── SCM (source control) ─────────────────────────────────────────
 repositories:
   - id: main-repo
     kind: github
@@ -107,23 +168,44 @@ repositories:
     defaultBranch: main
     tokenEnv: GITHUB_TOKEN
 
+# ── Coding agents ─────────────────────────────────────────────────
 harnessProfiles:
   - managed: true
-    id: cursor-composer
-    kind: cursor-composer
+    id: fast-impl
+    kind: claude-code # codex | claude-code | gemini-cli
+    model: claude-sonnet-4-5
+    instructions: 'Focus on tests and clean code.'
+    mcpServers:
+      - http://localhost:3001 # optional: inject MCP servers into agent sessions
+
+  - managed: true
+    id: strong-reviewer
+    kind: claude-code
     model: claude-opus-4-5
 
+# ── Roles ─────────────────────────────────────────────────────────
 roles:
   - id: implementer
-    harnessProfileId: cursor-composer
+    harnessProfileId: fast-impl
   - id: reviewer
-    harnessProfileId: cursor-composer
+    harnessProfileId: strong-reviewer
+    overrides:
+      instructions: 'Be strict. Check security and edge cases.'
 
+# ── Workflows ─────────────────────────────────────────────────────
 workflows:
   - id: default
     file: .dark-kitchen/workflows/default.ts
     roles: [implementer, reviewer]
 
+# ── Messaging (optional) ─────────────────────────────────────────
+channels:
+  - id: telegram
+    kind: telegram # telegram | discord | slack | imessage
+    tokenEnv: TELEGRAM_BOT_TOKEN
+    defaultTarget: '123456789' # your Telegram chat ID
+
+# ── Merge policy ─────────────────────────────────────────────────
 mergePolicy:
   strategy: squash
   requiredChecks: [ci]
@@ -131,107 +213,156 @@ mergePolicy:
   deleteHeadBranchAfterMerge: true
 ```
 
-### Linear + GitHub SCM
+### AGENTS.md — project-level agent instructions
 
-```yaml
-version: 1
+Create `AGENTS.md` (or `.dark-kitchen/AGENTS.md`) in your repository. Dark Kitchen automatically injects it into every agent session. Use it to describe:
 
-trackers:
-  - id: linear
-    kind: linear
-    workspace: my-workspace
-    tokenEnv: LINEAR_API_KEY
+- Architecture decisions
+- Coding standards
+- Testing requirements
+- Things agents must never do
 
-repositories:
-  - id: main-repo
-    kind: github
-    owner: my-org
-    repo: my-repo
-    defaultBranch: main
-    tokenEnv: GITHUB_TOKEN
+```markdown
+# Project instructions
 
-harnessProfiles:
-  - managed: true
-    id: cursor-composer
-    kind: cursor-composer
+## Stack
 
-roles:
-  - id: implementer
-    harnessProfileId: cursor-composer
+- TypeScript strict mode, ESM only
+- Vitest for tests
+- pnpm workspace
 
-workflows:
-  - id: default
-    file: .dark-kitchen/workflows/default.ts
-    roles: [implementer]
+## Rules
+
+- Never commit secrets
+- All public functions need JSDoc
+- Tests must pass before opening a PR
 ```
 
-### Adding E2E verification
+---
 
-```yaml
-capabilityProviders:
-  - managed: true
-    id: playwright
-    capability: browser.playwright
-    version: '>=1.40'
+## Live view (ADE)
 
-verificationProfiles:
-  - id: web-e2e
-    requiredCapabilities: [playwright]
-    timeoutSeconds: 300
-    retryPolicy:
-      maxAttempts: 2
-      delaySeconds: 10
-    evidencePolicy:
-      screenshots: true
-      logs: true
-    blocking: true
+```sh
+dk start
+# → Live dashboard: http://localhost:18800
+
+dk dashboard  # opens browser automatically
 ```
 
-## Daily Workflow (PM perspective)
+The dashboard shows in real time:
 
-1. **Plan** tasks through Dark Kitchen MCP (`dk_create_task`, `dk_add_dependency`)
-2. **Dark Kitchen** autonomously schedules and executes ready tasks in parallel
-3. **Monitor** via `dark-kitchen status`, `dk_list_interventions`
-4. **Intervene** when needed: `dk_resolve_intervention` with `retry`, `approve`, or `free-text`
-5. **Verify**: blocking E2E runs must pass before PR merge
+- Active runs and their task/role
+- Steps (start/complete/retry/error)
+- Agent output snippets
+- Intervention alerts
 
-See [docs/mcp.md](docs/mcp.md) for the full MCP tool reference.
+### Connect to Orca or other ADE
 
-## Harnesses
+```typescript
+import { ADEBridge, WebhookAdeAdapter } from '@dark-kitchen/runtime';
 
-Dark Kitchen supports:
+const bridge = new ADEBridge();
+// Webhook to any ADE with an HTTP API
+bridge.register(new WebhookAdeAdapter('my-ade', 'http://localhost:XXXX/dk-events'));
+```
 
-- **ACP/acpx**: Cursor Composer, Claude Code, Gemini CLI, and any custom ACP profile
-- **DeepSeek Harness (DSH)**: first-party native adapter (`@dark-kitchen/harness-deepseek`)
-- **Custom native**: any local executable via the `native-process` plugin
+---
 
-User-managed harness configurations (`.codex/`, `.claude/`, custom plugins) are never modified.
+## Human-in-the-loop
 
-See [docs/harnesses.md](docs/harnesses.md).
+When an agent is blocked (product decision, missing credentials, quota exhausted), Dark Kitchen:
 
-## Human-in-the-Loop
-
-When an agent needs human input (product decision, missing credentials, destructive approval), Dark Kitchen:
-
-1. Creates a typed intervention record
-2. Sends a notification through OpenClaw (to Telegram, WhatsApp, Discord, or Slack)
-3. Waits for a direct reply or structured action
+1. Creates a typed intervention (`auth`, `quota`, `rate-limit`, `approval`, `product-decision`…)
+2. Sends a notification on Telegram/Discord/iMessage/Slack
+3. Waits for your reply
 4. Resumes the exact workflow call that was waiting
 
-See [docs/interventions.md](docs/interventions.md).
+You never open an agent terminal. Just reply in your messaging app.
 
-## Security
+```
+🍳 Dark Kitchen — Intervention
 
-- Secrets are never stored in `.dark-kitchen/config.yaml` or SQLite; use environment variables
-- Third-party harness plugins require explicit allowlisting
-- Destructive actions (capability install, force-push) require policy approval
-- MCP server defaults to local-only binding
+Task: #42 Implement OAuth login
+Kind: product-decision
+Summary: Should we support Google and GitHub OAuth, or GitHub only?
 
-See [SECURITY.md](SECURITY.md) and [docs/architecture.md](docs/architecture.md).
+Reply with your answer or:
+  1. retry
+  2. stop
+```
 
-## Contributing
+---
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+## CLI reference
+
+```
+dk setup             Interactive setup (installs acpx, creates config)
+dk init              Create config template (non-interactive)
+dk start             Start the daemon (+ dashboard on :18800)
+dk stop              Stop the daemon
+dk status            Show daemon status
+dk dashboard         Open live dashboard in browser
+dk doctor            Check system health
+dk config get        Print current config
+dk interventions     List open interventions
+dk mcp               Start as MCP server on stdio
+```
+
+---
+
+## Architecture
+
+```
+PM (Cursor / ChatGPT + MCP)
+         │
+         ▼  dk mcp (stdio)
+┌────────────────────────────────────────────────────┐
+│  Dark Kitchen Control Plane                        │
+│                                                    │
+│  GitHub Issues / Linear / Jira (tracker)           │
+│         │                                          │
+│         ▼                                          │
+│  Scheduler → Git worktrees (1 per task)            │
+│         │                                          │
+│         ▼                                          │
+│  Workflow Engine (implement → review → verify)     │
+│    ├── implementer role → acpx → Claude Code       │
+│    ├── reviewer role    → acpx → Claude Opus       │
+│    └── verifier role    → acpx → Playwright/HTTP   │
+│         │                                          │
+│  AGENTS.md injected into every agent session       │
+│  MCP servers passed to acpx per harness profile    │
+│         │                                          │
+│         ▼                                          │
+│  PR lifecycle (push → CI → merge → close issue)    │
+│         │                                          │
+│  Interventions → Telegram/Discord/iMessage         │
+│  Live view     → http://localhost:18800            │
+└────────────────────────────────────────────────────┘
+```
+
+**Core invariant**: one active task = one primary Git worktree. Never shared.
+
+---
+
+## Trackers
+
+| Tracker       | Label for auto   | Dependency edges           |
+| ------------- | ---------------- | -------------------------- |
+| GitHub Issues | `dk:ready`       | Native sub-issues API      |
+| Linear        | `dk:ready` state | Blocking relations         |
+| Jira          | `dk:ready` label | Issue links (configurable) |
+
+**PM rule**: tracker mutations go through Dark Kitchen MCP (`dk_*` tools). Use the GitHub connector separately for code/PR/commit inspection.
+
+---
+
+## Prerequisites
+
+- Node.js >= 22.13
+- git
+- acpx (`npm install -g acpx` — done automatically by `dk setup`)
+- GitHub token with `repo` + `issues` scopes
 
 ## License
 
