@@ -4,6 +4,10 @@
     { "path": "./packages/core" },
     { "path": "./packages/process-execution" },
     { "path": "./packages/adapter-contract-fixture" },
+    { "path": "./packages/config" },
+    { "path": "./packages/runtime-store-sqlite" },
+    { "path": "./packages/workspace-manager" },
+    { "path": "./packages/workflow-engine" },
     { "path": "./apps/api" }
   ]
 }
