@@ -35,21 +35,20 @@ describe('buildWorktreeBranch', () => {
 });
 
 describe('GitWorktreeManager - basic lifecycle', () => {
+  let baseDir: string;
   let repoDir: string;
   let worktreesDir: string;
   let manager: GitWorktreeManager;
 
   beforeAll(async () => {
-    const base = join(tmpdir(), `dk-wm-${Date.now()}`);
-    repoDir = join(base, 'repo');
-    worktreesDir = join(base, 'worktrees');
+    baseDir = join(tmpdir(), `dk-wm-${Date.now()}`);
+    repoDir = join(baseDir, 'repo');
+    worktreesDir = join(baseDir, 'worktrees');
     await initRepo(repoDir);
     manager = new GitWorktreeManager({ repositoryPath: repoDir, worktreesBaseDir: worktreesDir });
   });
 
   afterAll(async () => {
-    const base = join(tmpdir(), `dk-wm-${Date.now()}`);
-    void base; // cleanup handled by OS tmpdir GC
     // Clean up manager worktrees
     const worktrees = await manager.listGitWorktrees().catch(() => []);
     for (const wt of worktrees) {
@@ -59,7 +58,7 @@ describe('GitWorktreeManager - basic lifecycle', () => {
         );
       }
     }
-    await rm(join(tmpdir(), `dk-wm-*`), { recursive: true, force: true }).catch(() => {});
+    await rm(baseDir, { recursive: true, force: true }).catch(() => {});
   });
 
   it('allocates a primary worktree', async () => {
@@ -132,6 +131,64 @@ describe('GitWorktreeManager - basic lifecycle', () => {
     const { stdout: ls2 } = await execAsync('ls', { cwd: ws2.path });
     expect(ls1).not.toContain('task-b.txt');
     expect(ls2).not.toContain('task-a.txt');
+  });
+
+  it('fails closed when the deterministic path is an unrelated directory', async () => {
+    await mkdir(join(worktreesDir, 'task-conflict'), { recursive: true });
+    await expect(
+      manager.allocatePrimaryWorktree({
+        projectId: createProjectId('proj-conflict'),
+        taskId: createTaskId('task-conflict'),
+        repositoryId: createRepositoryId('repo-1'),
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceError);
+  });
+
+  it('fails closed when the deterministic path is a matching branch in another repository', async () => {
+    const taskId = createTaskId('task-foreign-repo');
+    const projectId = createProjectId('proj-foreign-repo');
+    const foreignPath = join(worktreesDir, taskId);
+    const foreignRepo = join(baseDir, 'foreign-repo');
+    const branch = buildWorktreeBranch(taskId, projectId);
+    await initRepo(foreignRepo);
+    await execAsync(`git branch '${branch}'`, { cwd: foreignRepo });
+    await execAsync(`git worktree add '${foreignPath}' '${branch}'`, { cwd: foreignRepo });
+
+    await expect(
+      manager.allocatePrimaryWorktree({
+        projectId,
+        taskId,
+        repositoryId: createRepositoryId('repo-1'),
+      }),
+    ).rejects.toThrow(/not registered/);
+  });
+
+  it('revalidates repository ownership before reusing an in-memory workspace', async () => {
+    const taskId = createTaskId('task-replaced-worktree');
+    const projectId = createProjectId('proj-replaced-worktree');
+    const workspace = await manager.allocatePrimaryWorktree({
+      projectId,
+      taskId,
+      repositoryId: createRepositoryId('repo-1'),
+    });
+    await execAsync(`git worktree remove --force '${workspace.path}'`, { cwd: repoDir });
+
+    const foreignRepo = join(baseDir, 'replacement-repo');
+    const branch = buildWorktreeBranch(taskId, projectId);
+    await initRepo(foreignRepo);
+    await execAsync(`git branch '${branch}'`, { cwd: foreignRepo });
+    await execAsync(`git worktree add '${workspace.path}' '${branch}'`, { cwd: foreignRepo });
+
+    await expect(
+      manager.allocatePrimaryWorktree({
+        projectId,
+        taskId,
+        repositoryId: createRepositoryId('repo-1'),
+      }),
+    ).rejects.toThrow(/not registered/);
+
+    manager.markCompleted(workspace.id);
+    await expect(manager.releaseWorkspace(workspace.id)).rejects.toThrow(/not registered/);
   });
 
   it('refuses to release an active workspace', async () => {

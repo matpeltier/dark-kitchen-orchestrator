@@ -66,7 +66,7 @@ export class UnauthorizedPluginError extends Error {
   public constructor(packageName: string) {
     super(
       `Plugin "${packageName}" is not in the Dark Kitchen allowlist. ` +
-        `Add it to your .dark-kitchen/config.yaml allowedPlugins or register it with allowlistPlugin().`,
+        `Register it explicitly with allowlistPlugin() before loading it.`,
     );
     this.name = 'UnauthorizedPluginError';
   }

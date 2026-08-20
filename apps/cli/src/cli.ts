@@ -17,6 +17,14 @@ const command = args[0];
 const projectRoot = resolve(process.cwd());
 
 async function main(): Promise<void> {
+  if (command === '--help' || command === '-h' || command === 'help') {
+    printHelp();
+    return;
+  }
+  if (command === '--version' || command === '-v' || command === 'version') {
+    print(process.env['DK_PACKAGE_VERSION'] ?? 'development');
+    return;
+  }
   switch (command) {
     case 'setup': {
       // Full interactive setup: installs acpx, creates config, runs doctor
@@ -185,10 +193,16 @@ async function cmdInit(): Promise<void> {
       'roles:',
       '  - id: implementer',
       '    harnessProfileId: codex',
+      '  - id: reviewer',
+      '    harnessProfileId: codex',
+      '  - id: fixer',
+      '    harnessProfileId: codex',
+      '  - id: repository-tester',
+      '    harnessProfileId: codex',
       'workflows:',
       '  - id: default',
-      '    file: .dark-kitchen/workflows/default.ts',
-      '    roles: [implementer]',
+      '    builtin: default',
+      '    roles: [implementer, reviewer, fixer, repository-tester]',
     ].join('\n');
     await writeFile(configPath, template + '\n', 'utf8');
     print('Created .dark-kitchen/config.yaml — edit YOUR_ORG and YOUR_REPO.');

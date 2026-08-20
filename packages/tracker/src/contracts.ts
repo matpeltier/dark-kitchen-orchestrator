@@ -35,6 +35,16 @@ export interface CommentInput {
   readonly body: string;
 }
 
+/** Provider-neutral task comment returned to PM clients such as MCP. */
+export interface TrackerComment {
+  readonly id: string;
+  readonly taskId: TaskId;
+  readonly body: string;
+  readonly author?: string;
+  readonly createdAt: string;
+  readonly url?: string;
+}
+
 /**
  * Full tracker adapter contract including dependency management.
  * Extends the core TrackerAdapter with create/comment/dependency operations.
@@ -50,9 +60,14 @@ export interface FullTrackerAdapter {
   closeTask(taskId: TaskId): Promise<Task>;
   reopenTask(taskId: TaskId): Promise<Task>;
   addComment(input: CommentInput): Promise<void>;
+  listComments(taskId: TaskId): Promise<readonly TrackerComment[]>;
+  /** Opt a task into or out of autonomous execution without losing unrelated metadata. */
+  setAutonomousApproval(taskId: TaskId, approved: boolean): Promise<Task>;
   addDependency(input: AddDependencyInput): Promise<TaskDependency>;
   removeDependency(dependencyId: TaskDependencyId): Promise<void>;
   listDependencies(taskId: TaskId): Promise<readonly TaskDependency[]>;
+  /** Mark a task as blocked (stops the scheduler from picking it up). */
+  setBlocked(taskId: TaskId): Promise<void>;
 }
 
 export class TrackerError extends Error {

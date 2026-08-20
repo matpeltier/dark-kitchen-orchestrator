@@ -1,6 +1,4 @@
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   ProjectId,
@@ -11,8 +9,7 @@ import type {
   PrimaryWorktreeRequest,
 } from '@dark-kitchen/core';
 import { createWorkspaceId } from '@dark-kitchen/core';
-
-const execAsync = promisify(exec);
+import { controlArgument, defineProcess, executeProcess } from '@dark-kitchen/process-execution';
 
 export class WorkspaceError extends Error {
   public readonly worktreeCause?: unknown;
@@ -73,7 +70,7 @@ export class GitWorktreeManager implements WorkspaceManager {
     const workspaceId = createWorkspaceId(`ws-${request.taskId}`);
 
     // Check if the worktree already exists on disk (e.g. from a previous process)
-    const existingWorktree = await this.findExistingWorktree(worktreePath);
+    const existingWorktree = await this.findExistingWorktree(worktreePath, branchName);
     if (existingWorktree) {
       const workspace: Workspace = {
         id: workspaceId,
@@ -157,7 +154,10 @@ export class GitWorktreeManager implements WorkspaceManager {
     }
 
     if (workspace.kind === 'primary-worktree') {
-      await this.removeWorktree(workspace.path);
+      await this.removeWorktree(
+        workspace.path,
+        buildWorktreeBranch(workspace.taskId, workspace.projectId),
+      );
       this.primaryByTask.delete(workspace.taskId);
     }
 
@@ -196,49 +196,92 @@ export class GitWorktreeManager implements WorkspaceManager {
     const base = revision ?? 'HEAD';
     try {
       // Create the branch first (ignore error if it already exists)
-      await gitExec(this.options.repositoryPath, `git branch ${q(branchName)} ${q(base)}`).catch(
-        () => {
-          // Branch may already exist
-        },
-      );
-      await gitExec(
-        this.options.repositoryPath,
-        `git worktree add ${q(worktreePath)} ${q(branchName)}`,
-      );
+      await gitExec(this.options.repositoryPath, ['branch', branchName, base]).catch(() => {
+        // Branch may already exist
+      });
+      await gitExec(this.options.repositoryPath, ['worktree', 'add', worktreePath, branchName]);
     } catch (err) {
       throw new WorkspaceError(`git worktree add failed: ${String(err)}`, err);
     }
   }
 
-  private async removeWorktree(worktreePath: string): Promise<void> {
-    try {
-      await gitExec(this.options.repositoryPath, `git worktree remove --force ${q(worktreePath)}`);
-    } catch {
-      // If git command fails, try to remove the directory directly
-      await rm(worktreePath, { recursive: true, force: true });
+  private async removeWorktree(worktreePath: string, expectedBranch: string): Promise<void> {
+    if (!(await this.findExistingWorktree(worktreePath, expectedBranch))) {
+      throw new WorkspaceError(`Managed worktree ${worktreePath} no longer exists.`);
     }
-    await gitExec(this.options.repositoryPath, 'git worktree prune').catch(() => {
+    try {
+      await gitExec(this.options.repositoryPath, ['worktree', 'remove', '--force', worktreePath]);
+    } catch (error) {
+      // Never recursively delete a path that Git did not confirm as one of this
+      // repository's worktrees. A stale/injected workspace path must fail closed.
+      throw new WorkspaceError(
+        `Git refused to remove managed worktree ${worktreePath}: ${String(error)}`,
+        error,
+      );
+    }
+    await gitExec(this.options.repositoryPath, ['worktree', 'prune']).catch(() => {
       // prune is best-effort
     });
   }
 
-  private async findExistingWorktree(worktreePath: string): Promise<boolean> {
+  private async findExistingWorktree(
+    worktreePath: string,
+    expectedBranch: string,
+  ): Promise<boolean> {
     try {
       const s = await stat(worktreePath);
-      return s.isDirectory();
-    } catch {
+      if (!s.isDirectory()) {
+        throw new WorkspaceError(`Expected worktree path ${worktreePath} is not a directory.`);
+      }
+      const [{ stdout: topLevel }, { stdout: branch }] = await Promise.all([
+        gitExec(worktreePath, ['rev-parse', '--show-toplevel']),
+        gitExec(worktreePath, ['branch', '--show-current']),
+      ]);
+      const [actualRoot, expectedRoot] = await Promise.all([
+        realpath(topLevel.trim()),
+        realpath(worktreePath),
+      ]);
+      if (actualRoot !== expectedRoot) {
+        throw new WorkspaceError(
+          `Existing path ${worktreePath} resolves to a different Git worktree root.`,
+        );
+      }
+      if (branch.trim() !== expectedBranch) {
+        throw new WorkspaceError(
+          `Existing worktree ${worktreePath} is on ${branch.trim() || 'a detached HEAD'}, expected ${expectedBranch}.`,
+        );
+      }
+      let registered: GitWorktreeInfo | undefined;
+      for (const worktree of await listGitWorktrees(this.options.repositoryPath)) {
+        if ((await realpath(worktree.path)) === expectedRoot) {
+          registered = worktree;
+          break;
+        }
+      }
+      if (!registered || registered.branch !== expectedBranch) {
+        throw new WorkspaceError(
+          `Existing worktree ${worktreePath} is not registered to repository ${this.options.repositoryPath} on ${expectedBranch}.`,
+        );
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof WorkspaceError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new WorkspaceError(
+          `Existing path ${worktreePath} is not the expected managed Git worktree: ${String(error)}`,
+          error,
+        );
+      }
       return false;
     }
   }
 
   private async validateWorktreeHealth(workspace: Workspace): Promise<void> {
     try {
-      const s = await stat(workspace.path);
-      if (!s.isDirectory()) {
-        throw new WorkspaceError(`Worktree path ${workspace.path} exists but is not a directory.`);
+      const expectedBranch = buildWorktreeBranch(workspace.taskId, workspace.projectId);
+      if (!(await this.findExistingWorktree(workspace.path, expectedBranch))) {
+        throw new WorkspaceError(`Worktree at ${workspace.path} no longer exists.`);
       }
-      // Check it's a valid git worktree
-      await gitExec(workspace.path, 'git rev-parse --git-dir');
     } catch (err) {
       if (err instanceof WorkspaceError) throw err;
       throw new WorkspaceError(
@@ -257,7 +300,7 @@ export interface GitWorktreeInfo {
 }
 
 async function listGitWorktrees(repoPath: string): Promise<GitWorktreeInfo[]> {
-  const { stdout } = await gitExec(repoPath, 'git worktree list --porcelain');
+  const { stdout } = await gitExec(repoPath, ['worktree', 'list', '--porcelain']);
   return parseWorktreePorcelain(stdout);
 }
 
@@ -285,13 +328,30 @@ function parseWorktreePorcelain(output: string): GitWorktreeInfo[] {
   return result;
 }
 
-async function gitExec(cwd: string, command: string): Promise<{ stdout: string; stderr: string }> {
+async function gitExec(
+  cwd: string,
+  args: readonly string[],
+): Promise<{ stdout: string; stderr: string }> {
   try {
-    return await execAsync(command, { cwd });
+    const result = await executeProcess({
+      definition: defineProcess({
+        executable: 'git',
+        args: args.map(controlArgument),
+        label: 'git-worktree',
+      }),
+      cwd,
+    });
+    const stdout = Buffer.from(result.stdout).toString('utf8');
+    const stderr = Buffer.from(result.stderr).toString('utf8');
+    if (result.exitCode !== 0) {
+      throw new WorkspaceError(`git exited ${String(result.exitCode)}: ${stderr.trim()}`);
+    }
+    return { stdout, stderr };
   } catch (err: unknown) {
+    if (err instanceof WorkspaceError) throw err;
     const e = err as { message?: string; stderr?: string };
     throw new WorkspaceError(
-      `git command failed in ${cwd}: ${command}\n${e.stderr ?? e.message ?? String(err)}`,
+      `git command failed in ${cwd}: ${e.stderr ?? e.message ?? String(err)}`,
       err,
     );
   }
@@ -299,27 +359,28 @@ async function gitExec(cwd: string, command: string): Promise<{ stdout: string; 
 
 /** Build a deterministic, collision-safe branch name from task + project IDs. */
 export function buildWorktreeBranch(taskId: TaskId, projectId: ProjectId): string {
-  // Normalize to lowercase slugs; truncate to keep names manageable.
-  const taskSlug = taskId
-    .replace(/[^a-zA-Z0-9-]/g, '-')
-    .toLowerCase()
-    .slice(0, 40);
+  // Normalize to lowercase slugs.
+  const taskSlug = taskId.replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase();
   const projectSlug = projectId
     .replace(/[^a-zA-Z0-9-]/g, '-')
     .toLowerCase()
     .slice(0, 20);
-  return `dk/${projectSlug}/${taskSlug}`;
+  // Cap length while preserving the trailing identifier (e.g. the issue number),
+  // which is the distinguishing part and must not be truncated away.
+  const cappedTask = capPreservingTail(taskSlug, 80);
+  return `dk/${projectSlug}/${cappedTask}`;
+}
+
+/** Truncate `s` to `max` chars, keeping both a head prefix and the tail. */
+function capPreservingTail(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const headLen = Math.floor(max / 2);
+  const tailLen = max - headLen - 1;
+  return `${s.slice(0, headLen)}-${s.slice(-tailLen)}`;
 }
 
 /** Sanitize a task ID for use as a filesystem path component. */
 function sanitizePath(taskId: TaskId): string {
-  return taskId
-    .replace(/[^a-zA-Z0-9-]/g, '-')
-    .toLowerCase()
-    .slice(0, 60);
-}
-
-/** Shell-quote a single argument (simple, no newlines). */
-function q(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
+  const slug = taskId.replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase();
+  return capPreservingTail(slug, 60);
 }

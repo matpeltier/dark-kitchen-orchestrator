@@ -30,6 +30,57 @@ describe('MockScmAdapter - PR lifecycle', () => {
     expect(found?.sourceBranch).toBe('feat/x');
   });
 
+  it('creates or reuses one PR idempotently under replay', async () => {
+    const adapter = new MockScmAdapter();
+    const input = {
+      repositoryId: repoId,
+      sourceBranch: 'feat/idempotent',
+      targetBranch: 'main',
+      title: 'Idempotent',
+    } as const;
+    const [first, replay] = await Promise.all([
+      adapter.createPullRequest(input),
+      adapter.createPullRequest(input),
+    ]);
+    expect(replay.id).toBe(first.id);
+    expect(replay.number).toBe(first.number);
+  });
+
+  it('finds an already merged PR so post-merge recovery cannot recreate it', async () => {
+    const adapter = new MockScmAdapter();
+    const pr = await adapter.createPullRequest({
+      repositoryId: repoId,
+      sourceBranch: 'feat/merged-recovery',
+      targetBranch: 'main',
+      title: 'Merged recovery',
+    });
+    await adapter.merge({ pullRequestId: pr.id, repositoryId: repoId, strategy: 'squash' });
+    const found = await adapter.findPullRequestByBranch(repoId, 'feat/merged-recovery');
+    expect(found?.id).toBe(pr.id);
+    expect(found?.status).toBe('merged');
+  });
+
+  it('rejects malformed PR metadata and redacts credentials from the body', async () => {
+    const adapter = new MockScmAdapter();
+    await expect(
+      adapter.createPullRequest({
+        repositoryId: repoId,
+        sourceBranch: 'main',
+        targetBranch: 'main',
+        title: 'same branch',
+      }),
+    ).rejects.toThrow(/must differ/);
+    await adapter.createPullRequest({
+      repositoryId: repoId,
+      sourceBranch: 'feat/redact',
+      targetBranch: 'main',
+      title: 'redact',
+      body: 'token=super-secret',
+    });
+    expect(adapter.lastPrBody).not.toContain('super-secret');
+    expect(adapter.lastPrBody).toContain('[REDACTED]');
+  });
+
   it('merges a PR with passing checks', async () => {
     const adapter = new MockScmAdapter();
     const pr = await adapter.createPullRequest({

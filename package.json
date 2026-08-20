@@ -11,6 +11,7 @@
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "build": "tsc --build",
+    "smoke:package": "node scripts/smoke-package.mjs",
     "validate:packages": "node scripts/validate-packages.mjs",
     "validate": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm build && pnpm validate:packages"
   },
@@ -23,5 +24,24 @@
     "typescript": "5.7.2",
     "typescript-eslint": "8.19.1",
     "vitest": "2.1.8"
-  }
+  },
+  "version": "0.1.1",
+  "description": "Local-first control plane for autonomous software tasks",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matpeltier/dark-kitchen-orchestrator.git"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "automation",
+    "developer-tools"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/matpeltier/dark-kitchen-orchestrator/issues"
+  },
+  "homepage": "https://github.com/matpeltier/dark-kitchen-orchestrator#readme"
 }

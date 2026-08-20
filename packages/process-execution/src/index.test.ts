@@ -239,6 +239,25 @@ describe('safe process execution', () => {
       }
     }
   });
+
+  it('passes secret environment overrides without exposing them in diagnostics', async () => {
+    const secret = `dk-child-secret-${process.pid}-${Date.now()}`;
+    const diagnostics: unknown[] = [];
+    const printSecret = defineProcess({
+      executable: process.execPath,
+      args: controlArgs('-e', "process.stdout.write(process.env.DK_TEST_CHILD_SECRET ?? '')"),
+    });
+
+    const result = await executeProcess({
+      definition: printSecret,
+      environment: { DK_TEST_CHILD_SECRET: secret },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    expect(Buffer.from(result.stdout).toString('utf8')).toBe(secret);
+    expect(JSON.stringify(diagnostics)).not.toContain(secret);
+    expect(process.env['DK_TEST_CHILD_SECRET']).toBeUndefined();
+  });
 });
 
 interface AdapterContractCase {

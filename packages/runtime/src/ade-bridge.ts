@@ -269,7 +269,6 @@ export class AcpxLiveViewerAdapter implements AdeAdapter {
       const ws = new WS(this.viewerUrl);
 
       ws.on('open', () => {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         this.ws = ws;
         ws.send(JSON.stringify({ type: 'dark-kitchen.connect', version: '0.1' }));
       });
@@ -286,10 +285,8 @@ export class AcpxLiveViewerAdapter implements AdeAdapter {
   }
 
   public emit(event: AdeProgressEvent): void {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     if (!this.ws || this.ws.readyState !== 1) return;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       this.ws.send(JSON.stringify({ type: 'dark-kitchen.event', event }));
     } catch {
       /* ignore */

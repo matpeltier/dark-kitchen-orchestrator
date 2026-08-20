@@ -4,6 +4,14 @@ import { z } from 'zod';
 
 const nonEmptyString = z.string().min(1);
 
+/** Trusted configuration for a shell-free process invocation. */
+export const StructuredCommandSchema = z.object({
+  executable: nonEmptyString.max(4_096),
+  args: z.array(nonEmptyString.max(4_096)).max(128).optional(),
+  timeoutSeconds: z.number().int().min(1).optional(),
+});
+export type StructuredCommand = z.infer<typeof StructuredCommandSchema>;
+
 // ─── Version ─────────────────────────────────────────────────────────────────
 
 export const CONFIG_VERSION = 1 as const;
@@ -53,6 +61,8 @@ export const ProjectCapabilityProviderSchema = z.object({
   id: nonEmptyString,
   capability: nonEmptyString,
   description: nonEmptyString.optional(),
+  /** Explicit repository-owned command, required before command.exec is available. */
+  command: StructuredCommandSchema.optional(),
 });
 
 export const ExternalCapabilityProviderSchema = z.object({
@@ -127,6 +137,13 @@ export const RetryPolicySchema = z.object({
   delaySeconds: z.number().min(0).default(0),
 });
 
+/**
+ * Trusted project configuration for a shell-free verification lifecycle
+ * command. Runtime task/tracker text is never substituted into these fields.
+ */
+export const VerificationEnvironmentCommandSchema = StructuredCommandSchema;
+export type VerificationEnvironmentCommand = z.infer<typeof VerificationEnvironmentCommandSchema>;
+
 export const VerificationProfileSchema = z.object({
   id: nonEmptyString,
   verifierRoleId: nonEmptyString.optional(),
@@ -134,9 +151,9 @@ export const VerificationProfileSchema = z.object({
   skills: z.array(nonEmptyString).optional(),
   mcpServers: z.array(nonEmptyString).optional(),
   tools: z.array(nonEmptyString).optional(),
-  environmentSetup: z.array(nonEmptyString).optional(),
-  environmentTeardown: z.array(nonEmptyString).optional(),
-  environmentHealthcheck: z.array(nonEmptyString).optional(),
+  environmentSetup: z.array(VerificationEnvironmentCommandSchema).optional(),
+  environmentTeardown: z.array(VerificationEnvironmentCommandSchema).optional(),
+  environmentHealthcheck: z.array(VerificationEnvironmentCommandSchema).optional(),
   timeoutSeconds: z.number().int().min(1).optional(),
   retryPolicy: RetryPolicySchema.optional(),
   evidencePolicy: EvidencePolicySchema.optional(),
@@ -146,13 +163,43 @@ export type VerificationProfile = z.infer<typeof VerificationProfileSchema>;
 
 // ─── Workflows ────────────────────────────────────────────────────────────────
 
-export const WorkflowConfigSchema = z.object({
-  id: nonEmptyString,
-  file: nonEmptyString,
-  description: nonEmptyString.optional(),
-  roles: z.array(nonEmptyString).optional(),
-  verificationProfiles: z.array(nonEmptyString).optional(),
-});
+export const WorkflowTaskSelectorSchema = z
+  .object({
+    taskIds: z.array(nonEmptyString).optional(),
+    statuses: z
+      .array(z.enum(['backlog', 'ready', 'active', 'blocked', 'completed', 'cancelled']))
+      .optional(),
+    labelsAny: z.array(nonEmptyString).optional(),
+    labelsAll: z.array(nonEmptyString).optional(),
+    titleIncludes: z.array(nonEmptyString).optional(),
+    descriptionIncludes: z.array(nonEmptyString).optional(),
+    verificationProfilesAny: z.array(nonEmptyString).optional(),
+  })
+  .refine(
+    (selector) => Object.values(selector).some((value) => value !== undefined && value.length > 0),
+    'A workflow task selector must define at least one non-empty predicate.',
+  );
+export type WorkflowTaskSelector = z.infer<typeof WorkflowTaskSelectorSchema>;
+
+export const WorkflowConfigSchema = z
+  .object({
+    id: nonEmptyString,
+    /** Trusted project module, mutually exclusive with a stock built-in template. */
+    file: nonEmptyString.optional(),
+    builtin: z.enum(['default', 'design-frontend', 'high-risk']).optional(),
+    description: nonEmptyString.optional(),
+    roles: z.array(nonEmptyString).optional(),
+    verificationProfiles: z.array(nonEmptyString).optional(),
+    /** Fallback workflow when no task selector matches. At most one may be set. */
+    default: z.boolean().optional(),
+    /** Higher-priority matching workflows win; declaration order breaks ties. */
+    priority: z.number().int().optional(),
+    /** Deterministic assignment predicates evaluated against a normalized task. */
+    taskSelector: WorkflowTaskSelectorSchema.optional(),
+  })
+  .refine((workflow) => Boolean(workflow.file) !== Boolean(workflow.builtin), {
+    message: 'A workflow must define exactly one of file or builtin.',
+  });
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
 // ─── Channels ─────────────────────────────────────────────────────────────────
@@ -175,6 +222,14 @@ export const ChannelConfigSchema = z.object({
   token2Env: nonEmptyString.optional(),
   /** Default chat/user ID to send notifications to. */
   defaultTarget: nonEmptyString.optional(),
+  /** Optional provider sender allowlist in addition to the conversation allowlist. */
+  allowedSenderIds: z.array(nonEmptyString).optional(),
+  /** Telegram polling is the local default; webhook mode must be configured explicitly. */
+  telegramMode: z.enum(['polling', 'webhook']).optional(),
+  webhookPort: z.number().int().min(1).max(65_535).optional(),
+  webhookPath: nonEmptyString.optional(),
+  /** Environment variable holding the Telegram webhook secret token. */
+  webhookSecretEnv: nonEmptyString.optional(),
 });
 export type ChannelConfig = z.infer<typeof ChannelConfigSchema>;
 

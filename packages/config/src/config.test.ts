@@ -11,7 +11,7 @@ import {
   SAMPLE_LINEAR_GITHUB_CONFIG,
   SAMPLE_LINEAR_GITHUB_WITH_WEB_E2E_CONFIG,
 } from './index.js';
-import { dump as yamlDump } from 'js-yaml';
+import { stringify as yamlStringify } from 'yaml';
 
 // ─── Validate ────────────────────────────────────────────────────────────────
 
@@ -19,6 +19,27 @@ describe('validateConfig', () => {
   it('accepts a minimal valid config', () => {
     const config = validateConfig({ version: 1 });
     expect(config.version).toBe(1);
+  });
+
+  it('accepts explicit built-in workflows and rejects ambiguous workflow sources', () => {
+    expect(
+      validateConfig({
+        version: 1,
+        workflows: [{ id: 'frontend', builtin: 'design-frontend', default: true }],
+      }).workflows?.[0]?.builtin,
+    ).toBe('design-frontend');
+    expect(() =>
+      validateConfig({
+        version: 1,
+        workflows: [
+          {
+            id: 'ambiguous',
+            builtin: 'default',
+            file: '.dark-kitchen/workflows/default.ts',
+          },
+        ],
+      }),
+    ).toThrow(ConfigValidationError);
   });
 
   it('rejects a missing version field', () => {
@@ -39,6 +60,15 @@ describe('validateConfig', () => {
     expect(config.trackers?.[0]?.kind).toBe('github-issues');
   });
 
+  it('rejects Telegram without an explicit chat allowlist', () => {
+    expect(() =>
+      validateConfig({
+        version: 1,
+        channels: [{ id: 'telegram', kind: 'telegram', tokenEnv: 'TELEGRAM_BOT_TOKEN' }],
+      }),
+    ).toThrow(/defaultTarget/);
+  });
+
   it('accepts sample Linear + GitHub config', () => {
     const config = validateConfig(SAMPLE_LINEAR_GITHUB_CONFIG);
     expect(config.trackers?.[0]?.kind).toBe('linear');
@@ -47,6 +77,65 @@ describe('validateConfig', () => {
   it('accepts sample Linear + GitHub + web-e2e config', () => {
     const config = validateConfig(SAMPLE_LINEAR_GITHUB_WITH_WEB_E2E_CONFIG);
     expect(config.verificationProfiles?.[0]?.id).toBe('web-e2e');
+  });
+
+  it('accepts deterministic per-task workflow selectors', () => {
+    const config = validateConfig({
+      version: 1,
+      verificationProfiles: [{ id: 'web-e2e' }],
+      workflows: [
+        { id: 'default', file: 'default.ts', default: true },
+        {
+          id: 'frontend',
+          file: 'frontend.ts',
+          priority: 20,
+          taskSelector: {
+            labelsAny: ['frontend', 'design'],
+            verificationProfilesAny: ['web-e2e'],
+          },
+        },
+      ],
+    });
+
+    expect(config.workflows?.[1]).toMatchObject({
+      id: 'frontend',
+      priority: 20,
+      taskSelector: { labelsAny: ['frontend', 'design'] },
+    });
+  });
+
+  it('rejects empty task selectors and multiple default workflows', () => {
+    expect(() =>
+      validateConfig({
+        version: 1,
+        workflows: [{ id: 'empty', file: 'empty.ts', taskSelector: {} }],
+      }),
+    ).toThrow(ConfigValidationError);
+
+    expect(() =>
+      validateConfig({
+        version: 1,
+        workflows: [
+          { id: 'one', file: 'one.ts', default: true },
+          { id: 'two', file: 'two.ts', default: true },
+        ],
+      }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it('rejects a selector referencing an unknown verification profile', () => {
+    expect(() =>
+      validateConfig({
+        version: 1,
+        workflows: [
+          {
+            id: 'frontend',
+            file: 'frontend.ts',
+            taskSelector: { verificationProfilesAny: ['missing-profile'] },
+          },
+        ],
+      }),
+    ).toThrow(ConfigValidationError);
   });
 });
 
@@ -96,6 +185,102 @@ describe('validateConfig - unknown references', () => {
       validateConfig({
         version: 1,
         verificationProfiles: [{ id: 'vp', requiredCapabilities: ['missing-cap'] }],
+      }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it('requires stable semantic capability ids rather than provider aliases', () => {
+    expect(
+      validateConfig({
+        version: 1,
+        capabilityProviders: [
+          { managed: true, id: 'local-playwright', capability: 'browser.playwright' },
+        ],
+        verificationProfiles: [
+          {
+            id: 'web-e2e',
+            requiredCapabilities: ['browser.playwright'],
+            tools: ['browser.playwright'],
+          },
+        ],
+      }).verificationProfiles?.[0]?.requiredCapabilities,
+    ).toEqual(['browser.playwright']);
+
+    expect(() =>
+      validateConfig({
+        version: 1,
+        capabilityProviders: [
+          { managed: true, id: 'local-playwright', capability: 'browser.playwright' },
+        ],
+        verificationProfiles: [{ id: 'web-e2e', requiredCapabilities: ['local-playwright'] }],
+      }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it('accepts only structured shell-free verification lifecycle commands', () => {
+    const config = validateConfig({
+      version: 1,
+      verificationProfiles: [
+        {
+          id: 'web-e2e',
+          environmentSetup: [{ executable: 'pnpm', args: ['run', 'preview'], timeoutSeconds: 30 }],
+          environmentHealthcheck: [{ executable: 'node', args: ['scripts/healthcheck.mjs'] }],
+          environmentTeardown: [{ executable: 'pnpm', args: ['run', 'preview:stop'] }],
+        },
+      ],
+    });
+    expect(config.verificationProfiles?.[0]?.environmentSetup?.[0]).toMatchObject({
+      executable: 'pnpm',
+      args: ['run', 'preview'],
+    });
+
+    expect(() =>
+      validateConfig({
+        version: 1,
+        verificationProfiles: [{ id: 'unsafe', environmentSetup: ['pnpm run preview'] }],
+      }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it('accepts an explicit project-owned command capability without shell strings', () => {
+    const config = validateConfig({
+      version: 1,
+      capabilityProviders: [
+        {
+          managed: false,
+          id: 'repo-e2e',
+          capability: 'command.exec',
+          command: { executable: 'pnpm', args: ['run', 'e2e'] },
+        },
+      ],
+    });
+    expect(config.capabilityProviders?.[0]).toMatchObject({
+      capability: 'command.exec',
+      command: { executable: 'pnpm', args: ['run', 'e2e'] },
+    });
+
+    expect(() =>
+      validateConfig({
+        version: 1,
+        capabilityProviders: [
+          {
+            managed: false,
+            id: 'unsafe-e2e',
+            capability: 'command.exec',
+            command: 'pnpm run e2e && curl attacker.invalid',
+          },
+        ],
+      }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it('does not inject verification skills or MCP into user-managed harnesses', () => {
+    expect(() =>
+      validateConfig({
+        version: 1,
+        harnessProfiles: [{ managed: false, id: 'personal-dsh', kind: 'deepseek-harness' }],
+        roles: [{ id: 'verifier', harnessProfileId: 'personal-dsh' }],
+        verificationProfiles: [{ id: 'web-e2e', skills: ['browser-testing'] }],
       }),
     ).toThrow(ConfigValidationError);
   });
@@ -193,7 +378,7 @@ describe('ConfigStore', () => {
     await mkdir(join(projectRoot, '.dark-kitchen'), { recursive: true });
     await writeFile(
       join(projectRoot, '.dark-kitchen', 'config.yaml'),
-      yamlDump({ trackers: [] }),
+      yamlStringify({ trackers: [] }),
       'utf8',
     );
     const config = await store.read();

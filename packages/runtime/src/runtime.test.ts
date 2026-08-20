@@ -5,6 +5,7 @@ import {
   CyclicGraphError,
   InProcessDurableJournal,
   SqliteDurableJournal,
+  runIdForTask,
 } from './index.js';
 import { runWorkflow } from '@dark-kitchen/workflow-engine';
 import type { Task, TaskDependency } from '@dark-kitchen/core';
@@ -15,7 +16,7 @@ import {
   createTaskId,
 } from '@dark-kitchen/core';
 
-function makeTask(id: string, status: Task['status'] = 'backlog'): Task {
+function makeTask(id: string, status: Task['status'] = 'ready'): Task {
   const projectId = createProjectId('proj');
   return {
     id: createTaskId(id),
@@ -36,10 +37,23 @@ function makeBlocking(taskId: string, dependsOnTaskId: string): TaskDependency {
   };
 }
 
+// ─── runIdForTask ─────────────────────────────────────────────────────────────
+
+describe('runIdForTask', () => {
+  it('is deterministic and filesystem-safe', () => {
+    const id = createTaskId('github-issues:owner/repo#42');
+    const a = runIdForTask(id);
+    const b = runIdForTask(id);
+    expect(a).toBe(b);
+    expect(a).not.toMatch(/[:/#]/);
+    expect(a).toContain('42');
+  });
+});
+
 // ─── computeReadyTasks ────────────────────────────────────────────────────────
 
 describe('computeReadyTasks', () => {
-  it('returns backlog tasks with no dependencies', () => {
+  it('returns ready tasks with no dependencies', () => {
     const tasks = [makeTask('a'), makeTask('b')];
     const ready = computeReadyTasks(tasks, [], new Set());
     expect(ready.map((t) => t.id)).toContain(createTaskId('a'));
@@ -63,7 +77,7 @@ describe('computeReadyTasks', () => {
   });
 
   it('does not re-schedule active tasks', () => {
-    const taskA = makeTask('a', 'backlog');
+    const taskA = makeTask('a', 'ready');
     const active = new Set([createTaskId('a')]);
     const ready = computeReadyTasks([taskA], [], active);
     expect(ready).toHaveLength(0);
@@ -109,6 +123,24 @@ describe('RunSupervisor', () => {
     const tasks = [makeTask('a')];
     await supervisor.tick(tasks, []);
     await supervisor.tick(tasks, []); // second tick while a is active
+    expect(launcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-schedule a completed task even if still marked ready', async () => {
+    const launcher = vi.fn(async (taskId: string) => createRunId(`run-${taskId}`));
+    const supervisor = new RunSupervisor(
+      { maxParallelTasks: 4, projectId: createProjectId('p') },
+      launcher,
+    );
+
+    const tasks = [makeTask('a')];
+    await supervisor.tick(tasks, []);
+    expect(launcher).toHaveBeenCalledTimes(1);
+
+    // The task completed, but the tracker still reports it as 'ready' on the
+    // next poll (close-propagation lag) — it must not be re-scheduled.
+    supervisor.completeTask(createTaskId('a'));
+    await supervisor.tick([makeTask('a')], []);
     expect(launcher).toHaveBeenCalledTimes(1);
   });
 
@@ -174,8 +206,65 @@ describe('RunSupervisor', () => {
     const taskA = makeTask('a', 'blocked');
     const taskB = makeTask('b');
     await supervisor.tick([taskA, taskB], []);
-    expect(launched).not.toContain(createTaskId('a')); // blocked, not backlog/ready
+    expect(launched).not.toContain(createTaskId('a')); // blocked, not ready
     expect(launched).toContain(createTaskId('b'));
+  });
+
+  it('stopTask pauses + removes bookkeeping so a restart is required', async () => {
+    const launcher = vi.fn(async (taskId: string) => createRunId(`run-${taskId}`));
+    const supervisor = new RunSupervisor(
+      { maxParallelTasks: 4, projectId: createProjectId('p') },
+      launcher,
+    );
+    await supervisor.tick([makeTask('a')], []);
+    expect(launcher).toHaveBeenCalledTimes(1);
+
+    supervisor.stopTask(createTaskId('a'));
+    expect(supervisor.isActive(createTaskId('a'))).toBe(false);
+    expect(supervisor.getPausedTasks().has(createTaskId('a'))).toBe(true);
+
+    // Paused → not re-launched on next tick
+    await supervisor.tick([makeTask('a')], []);
+    expect(launcher).toHaveBeenCalledTimes(1);
+
+    // Explicit restart → scheduled again
+    supervisor.retryTask(createTaskId('a'));
+    expect(supervisor.getPausedTasks().has(createTaskId('a'))).toBe(false);
+    await supervisor.tick([makeTask('a')], []);
+    expect(launcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('retryTask clears completed bookkeeping so a task re-runs', async () => {
+    const launcher = vi.fn(async (taskId: string) => createRunId(`run-${taskId}`));
+    const supervisor = new RunSupervisor(
+      { maxParallelTasks: 4, projectId: createProjectId('p') },
+      launcher,
+    );
+    await supervisor.tick([makeTask('a')], []);
+    supervisor.completeTask(createTaskId('a'));
+    await supervisor.tick([makeTask('a')], []);
+    expect(launcher).toHaveBeenCalledTimes(1);
+
+    supervisor.retryTask(createTaskId('a'));
+    await supervisor.tick([makeTask('a')], []);
+    expect(launcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports scheduler status getters', async () => {
+    const launcher = vi.fn(async (taskId: string) => createRunId(`run-${taskId}`));
+    const supervisor = new RunSupervisor(
+      { maxParallelTasks: 3, projectId: createProjectId('p') },
+      launcher,
+    );
+    await supervisor.tick([makeTask('a')], []);
+    supervisor.completeTask(createTaskId('a'));
+    supervisor.pauseTask(createTaskId('b'));
+    supervisor.pauseTask(createTaskId('c'));
+
+    expect(supervisor.getActiveRuns().size).toBe(0); // completed a
+    expect(supervisor.getCompletedTasks().has(createTaskId('a'))).toBe(true);
+    expect(supervisor.getPausedTasks().size).toBe(2);
+    expect(supervisor.getMaxParallelTasks()).toBe(3);
   });
 });
 

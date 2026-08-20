@@ -1,0 +1,36 @@
+# Changelog
+
+Notable user-visible changes to Dark Kitchen are documented here. Tagged GitHub releases also use the repository comparison to generate complete release notes.
+
+## Unreleased
+
+No user-visible changes yet.
+
+## 0.1.1 - 2026-08-20
+
+### Added
+
+- Dynamic semantic-role workflows with durable replay, bounded retry/concurrency, and cancellation.
+- Deterministic per-task workflow selection by normalized tracker fields, with explicit default/design/high-risk built-ins and resumable approval gates.
+- ACP/acpx harness routing, stock user-managed DeepSeek Harness selection, and optional native/custom adapter contracts.
+- Durable runtime, intervention, verification, capability, MCP, PR lifecycle, and direct messaging boundaries.
+- SQLite-backed channel correlation/replay protection across daemon restarts and configurable Telegram sender/webhook controls.
+- npm tarball and container smoke gates, Docker runtime image, and long-running systemd/launchd examples.
+- Public architecture image, configuration/operation guides, security notes, and provider-specific commissioning checklists.
+- Explicit opt-in WhatsApp peer installation so the core npm package does not install a browser runtime on every node.
+- Explicit opt-in Discord and Slack peers so provider SDKs are installed only on nodes that enable those channels.
+
+### Changed
+
+- Process launches keep trusted executable/control metadata separate from arbitrary stdin/IPC/file payloads.
+- Git worktrees and PR lifecycle now preserve explicit recovery states instead of treating workflow completion as sufficient for merge/cleanup.
+
+### Known limitations
+
+- Arbitrary native/custom harness plugins still require explicit host loading and an allowlist.
+- Fresh DeepSeek Harness rc.8 resolution currently requires an isolated `@smithy/core` 3.33.2 override until its upstream dependency range is published consistently.
+- Verification environment commands and per-session MCP selection are operational, but referenced artifacts are not yet cryptographically attested; independent required SCM checks remain essential.
+
+## 0.1.0
+
+Initial pre-1.0 npm release of the Dark Kitchen control-plane prototype.

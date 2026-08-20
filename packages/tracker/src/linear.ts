@@ -20,6 +20,7 @@ import type {
   CommentInput,
   CreateTaskInput,
   FullTrackerAdapter,
+  TrackerComment,
   TrackerTaskUpdate,
 } from './contracts.js';
 import { CyclicDependencyError, TrackerError, wouldCreateCycle } from './contracts.js';
@@ -173,6 +174,10 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
     return this.updateTask(taskId, { status: 'backlog' });
   }
 
+  public async setBlocked(taskId: TaskId): Promise<void> {
+    await this.updateTask(taskId, { status: 'blocked' });
+  }
+
   public async addComment(input: CommentInput): Promise<void> {
     const linearId = requireLinearId(input.taskId);
     await this.graphql(
@@ -183,6 +188,46 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
     `,
       { issueId: linearId, body: input.body },
     );
+  }
+
+  public async listComments(taskId: TaskId): Promise<readonly TrackerComment[]> {
+    const linearId = requireLinearId(taskId);
+    const result = await this.graphql<{
+      issue: {
+        comments: {
+          nodes: Array<{
+            id: string;
+            body: string;
+            createdAt: string;
+            url?: string;
+            user?: { name?: string; email?: string };
+          }>;
+        };
+      };
+    }>(
+      `
+      query ListComments($id: String!) {
+        issue(id: $id) {
+          comments { nodes { id body createdAt url user { name email } } }
+        }
+      }
+    `,
+      { id: linearId },
+    );
+    return (result.issue?.comments?.nodes ?? []).map((comment) => ({
+      id: comment.id,
+      taskId,
+      body: comment.body,
+      ...(comment.user?.name || comment.user?.email
+        ? { author: comment.user.name ?? comment.user.email }
+        : {}),
+      createdAt: comment.createdAt,
+      ...(comment.url ? { url: comment.url } : {}),
+    }));
+  }
+
+  public async setAutonomousApproval(taskId: TaskId, approved: boolean): Promise<Task> {
+    return this.updateTask(taskId, { status: approved ? 'ready' : 'backlog' });
   }
 
   public async addDependency(input: AddDependencyInput): Promise<TaskDependency> {
@@ -249,6 +294,8 @@ export class LinearTrackerAdapter implements FullTrackerAdapter {
       updatedAt: issue.updatedAt ?? new Date().toISOString(),
     };
     if (issue.description) Object.assign(base, { description: issue.description });
+    const labels = issue.labels?.nodes.map((label) => label.name).filter(Boolean) ?? [];
+    if (labels.length > 0) Object.assign(base, { labels });
     return base;
   }
 

@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { dump as yamlDump } from 'js-yaml';
+import { stringify as yamlStringify } from 'yaml';
 import type { DarkKitchenConfig } from '@dark-kitchen/config';
 import { runDoctor, formatDoctorReport } from './doctor.js';
 
@@ -47,15 +47,15 @@ export async function runSetup(projectRoot: string): Promise<void> {
     }
 
     // ── 3. acpx ─────────────────────────────────────────────────────────────
-    const acpxInstalled = isCommandAvailable('acpx');
+    const acpxInstalled = hasCompatibleAcpx();
     if (!acpxInstalled) {
-      print('\nacpx not found — installing globally...');
-      const result = spawnSync('npm', ['install', '-g', 'acpx'], {
+      print('\nacpx not found — installing the supported release globally...');
+      const result = spawnSync('npm', ['install', '-g', 'acpx@0.13.1'], {
         stdio: 'inherit',
         shell: false,
       });
       if (result.status !== 0) {
-        printErr('Failed to install acpx. Try manually: npm install -g acpx');
+        printErr('Failed to install acpx. Try manually: npm install -g acpx@0.13.1');
         process.exit(1);
       }
       print('✓ acpx installed');
@@ -115,56 +115,28 @@ export async function runSetup(projectRoot: string): Promise<void> {
     const defaultBranch = (await rl.question('Default branch [main]: ')).trim() || 'main';
 
     print('\n── Agent (harness) setup ───────────────────────────────────────');
-    print('Available ACP agents: codex, claude-code, gemini-cli');
+    print('Available ACP agents: codex, claude, gemini, opencode, cursor, copilot');
     const agentKind = (await rl.question('Agent type [codex]: ')).trim() || 'codex';
 
-    print('\n── Messaging channel for notifications (optional) ──────────────────');
-    print('Dark Kitchen can notify you and accept replies via messaging.');
-    print('Options: telegram, discord, slack, imessage (macOS only), none');
-    const channelKind = (await rl.question('Channel [none]: ')).trim().toLowerCase() || 'none';
-
-    let channelConfig: NonNullable<DarkKitchenConfig['channels']> = [];
-    if (channelKind === 'telegram') {
-      print('  Create a bot via @BotFather → copy the token');
-      const tokenEnv =
-        (await rl.question('  Env var for bot token [TELEGRAM_BOT_TOKEN]: ')).trim() ||
-        'TELEGRAM_BOT_TOKEN';
-      const defaultTarget = (
-        await rl.question(
-          '  Your Telegram chat ID (run: curl https://api.telegram.org/bot$TOKEN/getUpdates): ',
-        )
-      ).trim();
-      channelConfig = [{ id: 'telegram', kind: 'telegram', tokenEnv, defaultTarget }];
-    } else if (channelKind === 'discord') {
-      print('  Create a bot at discord.com/developers → invite to server');
-      const tokenEnv =
-        (await rl.question('  Env var for bot token [DISCORD_BOT_TOKEN]: ')).trim() ||
-        'DISCORD_BOT_TOKEN';
-      const defaultTarget = (
-        await rl.question('  Channel ID (right-click channel → Copy ID): ')
-      ).trim();
-      channelConfig = [{ id: 'discord', kind: 'discord', tokenEnv, defaultTarget }];
-    } else if (channelKind === 'slack') {
-      print('  Create a Slack app with Socket Mode enabled at api.slack.com/apps');
-      const tokenEnv =
-        (await rl.question('  Env var for bot token [SLACK_BOT_TOKEN]: ')).trim() ||
-        'SLACK_BOT_TOKEN';
-      const token2Env =
-        (await rl.question('  Env var for app token [SLACK_APP_TOKEN]: ')).trim() ||
-        'SLACK_APP_TOKEN';
-      const defaultTarget = (await rl.question('  Channel ID: ')).trim();
-      channelConfig = [{ id: 'slack', kind: 'slack', tokenEnv, token2Env, defaultTarget }];
-    } else if (channelKind === 'imessage') {
-      print('  macOS only — no token needed');
-      const defaultTarget = (await rl.question('  Your iMessage handle (phone or email): ')).trim();
-      channelConfig = [{ id: 'imessage', kind: 'imessage', defaultTarget }];
-    }
+    print('\n── Telegram notifications ────────────────────────────────────────');
+    print('Dark Kitchen notifies you and accepts replies via Telegram.');
+    print('Create a bot with @BotFather and copy the token.');
+    const tokenEnv =
+      (await rl.question('  Env var for bot token [TELEGRAM_BOT_TOKEN]: ')).trim() ||
+      'TELEGRAM_BOT_TOKEN';
+    const defaultTarget = (
+      await rl.question(
+        '  Your Telegram chat ID (get it via: curl https://api.telegram.org/bot$TOKEN/getUpdates): ',
+      )
+    ).trim();
+    const channelConfig: NonNullable<DarkKitchenConfig['channels']> = [
+      { id: 'telegram', kind: 'telegram', tokenEnv, defaultTarget },
+    ];
 
     print('\n── Merge policy ────────────────────────────────────────────────');
     const autoMerge =
       (await rl.question('Auto-merge PRs when CI passes? [y/N]: ')).toLowerCase() === 'y';
-    const ciCheck =
-      (await rl.question('Required CI check name (leave blank to skip) [ci]: ')).trim() || '';
+    const ciCheck = (await rl.question('Required CI check name [ci]: ')).trim() || 'ci';
 
     // ── 6. Build config object ───────────────────────────────────────────────
     const config: DarkKitchenConfig = {
@@ -190,12 +162,14 @@ export async function runSetup(projectRoot: string): Promise<void> {
       roles: [
         { id: 'implementer', harnessProfileId: agentKind },
         { id: 'reviewer', harnessProfileId: agentKind },
+        { id: 'fixer', harnessProfileId: agentKind },
+        { id: 'repository-tester', harnessProfileId: agentKind },
       ],
       workflows: [
         {
           id: 'default',
-          file: '.dark-kitchen/workflows/default.ts',
-          roles: ['implementer', 'reviewer'],
+          builtin: 'default',
+          roles: ['implementer', 'reviewer', 'fixer', 'repository-tester'],
         },
       ],
       ...(autoMerge
@@ -213,7 +187,7 @@ export async function runSetup(projectRoot: string): Promise<void> {
 
     // ── 7. Write config ──────────────────────────────────────────────────────
     await mkdir(configDir, { recursive: true });
-    const yaml = yamlDump(config, { lineWidth: 120, quotingType: '"' });
+    const yaml = yamlStringify(config, { lineWidth: 120 });
     await writeFile(configPath, yaml, 'utf8');
 
     // ── 8. Write .env.example ────────────────────────────────────────────────
@@ -277,13 +251,11 @@ export async function runSetup(projectRoot: string): Promise<void> {
   }
 }
 
-function isCommandAvailable(cmd: string): boolean {
-  try {
-    execSync(`which ${cmd}`, { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
+function hasCompatibleAcpx(): boolean {
+  const result = spawnSync('acpx', ['--version'], { encoding: 'utf8', shell: false });
+  if (result.status !== 0) return false;
+  const version = `${result.stdout ?? ''}${result.stderr ?? ''}`.match(/\b(\d+)\.(\d+)\.(\d+)\b/u);
+  return version?.[1] === '0' && version[2] === '13' && Number(version[3]) >= 1;
 }
 
 function print(msg: string): void {

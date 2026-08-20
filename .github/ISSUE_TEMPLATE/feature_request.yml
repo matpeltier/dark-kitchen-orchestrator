@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a change to the Dark Kitchen control plane
+title: '[Feature]: '
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What operator or agent problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior, including failure and human-intervention cases.
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Primary boundary
+      options:
+        - Workflow/runtime
+        - Harness/model
+        - Tracker/SCM
+        - MCP/PM
+        - Channel/intervention
+        - Verification/capability
+        - Documentation/tooling
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Suggested acceptance criteria
+      description: List the tests or evidence that would prove the feature works.

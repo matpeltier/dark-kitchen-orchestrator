@@ -8,6 +8,9 @@ export interface RoleDefinition {
   readonly modelOverride?: string;
   readonly reasoningOverride?: string;
   readonly instructionsOverride?: string;
+  readonly skillsOverride?: readonly string[];
+  readonly mcpServersOverride?: readonly string[];
+  readonly pluginsOverride?: readonly string[];
   readonly requiredCapabilities?: readonly HarnessCapability[];
 }
 
@@ -38,6 +41,13 @@ export class RuntimeNotFoundError extends Error {
   }
 }
 
+export class DuplicateRuntimeKindError extends Error {
+  public constructor(kind: string) {
+    super(`Multiple harness runtimes are registered for kind "${kind}"`);
+    this.name = 'DuplicateRuntimeKindError';
+  }
+}
+
 /**
  * Routes semantic workflow roles to harness profiles and execution nodes.
  * Validates capability requirements before returning a resolved role.
@@ -50,7 +60,12 @@ export class RoleRouter {
   public constructor(options: RoleRouterOptions) {
     this.roles = new Map(options.roles.map((r) => [r.roleId, r]));
     this.profiles = new Map(options.profiles.map((p) => [p.id, p]));
-    this.runtimes = new Map(options.runtimes.map((r) => [r.id, r]));
+    const runtimes = new Map<string, HarnessRuntime>();
+    for (const runtime of options.runtimes) {
+      if (runtimes.has(runtime.kind)) throw new DuplicateRuntimeKindError(runtime.kind);
+      runtimes.set(runtime.kind, runtime);
+    }
+    this.runtimes = runtimes;
   }
 
   /**
@@ -67,29 +82,57 @@ export class RoleRouter {
     // Validate overrides are only used with managed profiles
     if (
       profile.managed === false &&
-      (roleDef.modelOverride ?? roleDef.reasoningOverride ?? roleDef.instructionsOverride)
+      (roleDef.modelOverride ??
+        roleDef.reasoningOverride ??
+        roleDef.instructionsOverride ??
+        roleDef.skillsOverride ??
+        roleDef.mcpServersOverride ??
+        roleDef.pluginsOverride)
     ) {
       throw new Error(
         `Role "${roleId}" declares overrides but harness profile "${profile.id}" is user-managed (overrides not supported)`,
       );
     }
 
-    // Validate required capabilities
     const runtime = this.runtimes.get(profile.kind);
-    if (runtime && roleDef.requiredCapabilities) {
-      for (const cap of roleDef.requiredCapabilities) {
-        if (!runtime.capabilities.supported.has(cap)) {
-          throw new UnsupportedCapabilityError(cap, profile.id);
-        }
+    if (!runtime) throw new RuntimeNotFoundError(profile.kind);
+
+    // Validate explicit requirements and every managed profile/role option
+    // whose application depends on a negotiated runtime capability.
+    const requiredCapabilities = new Set(roleDef.requiredCapabilities ?? []);
+    if (profile.managed) {
+      if (roleDef.modelOverride ?? profile.model) requiredCapabilities.add('model.selection');
+      if (roleDef.reasoningOverride ?? profile.reasoning) {
+        requiredCapabilities.add('reasoning.selection');
+      }
+      if ((roleDef.skillsOverride?.length ?? profile.skills?.length ?? 0) > 0) {
+        requiredCapabilities.add('skills.custom');
+      }
+      if ((roleDef.mcpServersOverride?.length ?? profile.mcpServers?.length ?? 0) > 0) {
+        requiredCapabilities.add('skills.mcp');
+      }
+      if ((roleDef.pluginsOverride?.length ?? profile.plugins?.length ?? 0) > 0) {
+        requiredCapabilities.add('skills.plugins');
+      }
+    }
+    for (const cap of requiredCapabilities) {
+      if (!runtime.capabilities.supported.has(cap)) {
+        throw new UnsupportedCapabilityError(cap, profile.id);
       }
     }
 
-    const resolved: ResolvedRole = { roleId, profile };
+    const resolved: ResolvedRole = { roleId, profile, runtime };
     if (roleDef.modelOverride) Object.assign(resolved, { modelOverride: roleDef.modelOverride });
     if (roleDef.reasoningOverride)
       Object.assign(resolved, { reasoningOverride: roleDef.reasoningOverride });
     if (roleDef.instructionsOverride)
       Object.assign(resolved, { instructionsOverride: roleDef.instructionsOverride });
+    if (roleDef.skillsOverride)
+      Object.assign(resolved, { skillsOverride: [...roleDef.skillsOverride] });
+    if (roleDef.mcpServersOverride)
+      Object.assign(resolved, { mcpServersOverride: [...roleDef.mcpServersOverride] });
+    if (roleDef.pluginsOverride)
+      Object.assign(resolved, { pluginsOverride: [...roleDef.pluginsOverride] });
     return resolved;
   }
 

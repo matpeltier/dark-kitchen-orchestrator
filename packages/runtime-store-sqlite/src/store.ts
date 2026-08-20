@@ -3,6 +3,11 @@ import { dirname } from 'node:path';
 import type {
   AgentSession,
   AgentSessionId,
+  AgentSessionRuntimeBinding,
+  ChannelAddress,
+  ChannelInboundReceipt,
+  ChannelMessageCorrelation,
+  ChannelMessageId,
   Configuration,
   ConfigurationId,
   DomainEvent,
@@ -130,11 +135,12 @@ export class SqliteRuntimeStore implements RuntimeStore {
     this.db
       .prepare(
         `
-      INSERT INTO tasks (id, project_id, title, description, status, tracker_provider, tracker_id, tracker_url, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, project_id, title, description, labels_json, status, tracker_provider, tracker_id, tracker_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
+        labels_json = excluded.labels_json,
         status = excluded.status,
         tracker_provider = excluded.tracker_provider,
         tracker_id = excluded.tracker_id,
@@ -147,6 +153,7 @@ export class SqliteRuntimeStore implements RuntimeStore {
         task.projectId,
         task.title,
         task.description ?? null,
+        task.labels ? JSON.stringify(task.labels) : null,
         task.status,
         task.trackerReference?.provider ?? null,
         task.trackerReference?.id ?? null,
@@ -273,6 +280,20 @@ export class SqliteRuntimeStore implements RuntimeStore {
     return runFromRow(row, nodeIds);
   }
 
+  public async listRuns(): Promise<Run[]> {
+    const rows = this.db.prepare('SELECT * FROM runs ORDER BY created_at ASC').all() as RunRow[];
+    return rows.map((row) =>
+      runFromRow(
+        row,
+        (
+          this.db
+            .prepare('SELECT execution_node_id FROM run_execution_nodes WHERE run_id = ?')
+            .all(row.id) as { execution_node_id: string }[]
+        ).map((r) => r.execution_node_id as ExecutionNodeId),
+      ),
+    );
+  }
+
   public async saveRun(run: Run): Promise<void> {
     const save = () => {
       this.db
@@ -329,6 +350,22 @@ export class SqliteRuntimeStore implements RuntimeStore {
     return workflowRunFromRow(row, runIds);
   }
 
+  public async listWorkflowRuns(): Promise<WorkflowRun[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM workflow_runs ORDER BY created_at ASC')
+      .all() as WorkflowRunRow[];
+    return rows.map((row) =>
+      workflowRunFromRow(
+        row,
+        (
+          this.db
+            .prepare('SELECT run_id FROM workflow_run_runs WHERE workflow_run_id = ?')
+            .all(row.id) as { run_id: string }[]
+        ).map((r) => r.run_id as RunId),
+      ),
+    );
+  }
+
   public async saveWorkflowRun(workflowRun: WorkflowRun): Promise<void> {
     const save = () => {
       this.db
@@ -375,6 +412,13 @@ export class SqliteRuntimeStore implements RuntimeStore {
     return row ? agentSessionFromRow(row) : undefined;
   }
 
+  public async listAgentSessions(): Promise<AgentSession[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM agent_sessions ORDER BY created_at ASC')
+      .all() as AgentSessionRow[];
+    return rows.map(agentSessionFromRow);
+  }
+
   public async saveAgentSession(session: AgentSession): Promise<void> {
     this.db
       .prepare(
@@ -400,6 +444,84 @@ export class SqliteRuntimeStore implements RuntimeStore {
       );
   }
 
+  public async getAgentSessionRuntimeBinding(
+    agentSessionId: AgentSessionId,
+  ): Promise<AgentSessionRuntimeBinding | undefined> {
+    const row = this.db
+      .prepare('SELECT * FROM agent_session_runtime_bindings WHERE session_id = ?')
+      .get(agentSessionId) as AgentSessionRuntimeBindingRow | undefined;
+    return row ? agentSessionRuntimeBindingFromRow(row) : undefined;
+  }
+
+  public async saveAgentSessionRuntimeBinding(binding: AgentSessionRuntimeBinding): Promise<void> {
+    this.db
+      .prepare(
+        `
+      INSERT INTO agent_session_runtime_bindings (
+        session_id, runtime_id, runtime_kind, profile_id, profile_snapshot,
+        initial_prompt, role_id, model, reasoning, last_activity_at, last_error,
+        usage, source_session_id, source_action, control_request_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        runtime_id = excluded.runtime_id,
+        runtime_kind = excluded.runtime_kind,
+        profile_id = excluded.profile_id,
+        profile_snapshot = excluded.profile_snapshot,
+        initial_prompt = excluded.initial_prompt,
+        role_id = excluded.role_id,
+        model = excluded.model,
+        reasoning = excluded.reasoning,
+        last_activity_at = excluded.last_activity_at,
+        last_error = excluded.last_error,
+        usage = excluded.usage,
+        source_session_id = excluded.source_session_id,
+        source_action = excluded.source_action,
+        control_request_id = excluded.control_request_id,
+        updated_at = excluded.updated_at
+    `,
+      )
+      .run(
+        binding.sessionId,
+        binding.runtimeId,
+        binding.runtimeKind,
+        binding.profileId,
+        JSON.stringify(binding.profileSnapshot),
+        redactStoredPrompt(binding.initialPrompt),
+        binding.roleId ?? null,
+        binding.model ?? null,
+        binding.reasoning ?? null,
+        binding.lastActivityAt,
+        binding.lastError ?? null,
+        binding.usage ? JSON.stringify(binding.usage) : null,
+        binding.sourceSessionId ?? null,
+        binding.sourceAction ?? null,
+        binding.controlRequestId ?? null,
+        binding.createdAt,
+        binding.updatedAt,
+      );
+  }
+
+  public async listAgentSessionRuntimeBindings(options?: {
+    readonly sourceSessionId?: AgentSessionId;
+    readonly controlRequestId?: string;
+  }): Promise<AgentSessionRuntimeBinding[]> {
+    const clauses: string[] = [];
+    const parameters: string[] = [];
+    if (options?.sourceSessionId) {
+      clauses.push('source_session_id = ?');
+      parameters.push(options.sourceSessionId);
+    }
+    if (options?.controlRequestId) {
+      clauses.push('control_request_id = ?');
+      parameters.push(options.controlRequestId);
+    }
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db
+      .prepare(`SELECT * FROM agent_session_runtime_bindings${where} ORDER BY created_at ASC`)
+      .all(...parameters) as AgentSessionRuntimeBindingRow[];
+    return rows.map(agentSessionRuntimeBindingFromRow);
+  }
+
   // ─── Workspaces ────────────────────────────────────────────────────────────
 
   public async getWorkspace(workspaceId: WorkspaceId): Promise<Workspace | undefined> {
@@ -407,6 +529,13 @@ export class SqliteRuntimeStore implements RuntimeStore {
       | WorkspaceRow
       | undefined;
     return row ? workspaceFromRow(row) : undefined;
+  }
+
+  public async listWorkspaces(): Promise<Workspace[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM workspaces ORDER BY created_at ASC')
+      .all() as WorkspaceRow[];
+    return rows.map(workspaceFromRow);
   }
 
   public async saveWorkspace(workspace: Workspace): Promise<void> {
@@ -443,6 +572,13 @@ export class SqliteRuntimeStore implements RuntimeStore {
       | InterventionRow
       | undefined;
     return row ? interventionFromRow(row) : undefined;
+  }
+
+  public async listInterventions(): Promise<Intervention[]> {
+    const rows = this.db
+      .prepare('SELECT * FROM interventions ORDER BY created_at ASC')
+      .all() as InterventionRow[];
+    return rows.map(interventionFromRow);
   }
 
   public async saveIntervention(intervention: Intervention): Promise<void> {
@@ -505,6 +641,132 @@ export class SqliteRuntimeStore implements RuntimeStore {
       );
   }
 
+  // ─── Channel correlations ────────────────────────────────────────────────
+
+  public async saveChannelMessageCorrelation(
+    correlation: ChannelMessageCorrelation,
+  ): Promise<void> {
+    const id = channelCorrelationKey(
+      correlation.transportId,
+      correlation.address,
+      correlation.messageId,
+    );
+    this.db
+      .prepare(
+        `
+      INSERT INTO channel_message_correlations (
+        id, channel, conversation_id, intervention_id, sent_at,
+        transport_id, message_id, code, active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(transport_id, channel, conversation_id, message_id) DO UPDATE SET
+        intervention_id = excluded.intervention_id,
+        sent_at = excluded.sent_at,
+        code = excluded.code,
+        active = excluded.active
+    `,
+      )
+      .run(
+        id,
+        correlation.address.channel,
+        correlation.address.conversationId,
+        correlation.interventionId,
+        correlation.sentAt,
+        correlation.transportId,
+        correlation.messageId,
+        correlation.code,
+        correlation.active ? 1 : 0,
+      );
+  }
+
+  public async getActiveChannelMessageCorrelation(
+    transportId: string,
+    address: ChannelAddress,
+    messageId: ChannelMessageId,
+  ): Promise<ChannelMessageCorrelation | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM channel_message_correlations
+         WHERE transport_id = ? AND channel = ? AND conversation_id = ?
+           AND message_id = ? AND active = 1`,
+      )
+      .get(transportId, address.channel, address.conversationId, messageId) as
+      | ChannelMessageCorrelationRow
+      | undefined;
+    return row ? channelMessageCorrelationFromRow(row) : undefined;
+  }
+
+  public async listActiveChannelMessageCorrelations(options?: {
+    readonly transportId?: string;
+    readonly address?: ChannelAddress;
+    readonly interventionId?: InterventionId;
+    readonly code?: string;
+  }): Promise<ChannelMessageCorrelation[]> {
+    const clauses = ['active = 1'];
+    const parameters: string[] = [];
+    if (options?.transportId) {
+      clauses.push('transport_id = ?');
+      parameters.push(options.transportId);
+    }
+    if (options?.address) {
+      clauses.push('channel = ?', 'conversation_id = ?');
+      parameters.push(options.address.channel, options.address.conversationId);
+    }
+    if (options?.interventionId) {
+      clauses.push('intervention_id = ?');
+      parameters.push(options.interventionId);
+    }
+    if (options?.code) {
+      clauses.push('LOWER(code) = LOWER(?)');
+      parameters.push(options.code.trim());
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM channel_message_correlations
+         WHERE ${clauses.join(' AND ')} ORDER BY sent_at ASC, id ASC`,
+      )
+      .all(...parameters) as ChannelMessageCorrelationRow[];
+    return rows.map(channelMessageCorrelationFromRow);
+  }
+
+  public async deactivateChannelMessageCorrelations(interventionId: InterventionId): Promise<void> {
+    this.db
+      .prepare('UPDATE channel_message_correlations SET active = 0 WHERE intervention_id = ?')
+      .run(interventionId);
+  }
+
+  public async hasProcessedChannelInbound(
+    receipt: Omit<ChannelInboundReceipt, 'processedAt'>,
+  ): Promise<boolean> {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS found FROM channel_inbound_receipts
+         WHERE transport_id = ? AND channel = ? AND conversation_id = ? AND message_id = ?`,
+      )
+      .get(
+        receipt.transportId,
+        receipt.address.channel,
+        receipt.address.conversationId,
+        receipt.messageId,
+      ) as { found: number } | undefined;
+    return row?.found === 1;
+  }
+
+  public async saveProcessedChannelInbound(receipt: ChannelInboundReceipt): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO channel_inbound_receipts (
+          transport_id, channel, conversation_id, message_id, processed_at
+        ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        receipt.transportId,
+        receipt.address.channel,
+        receipt.address.conversationId,
+        receipt.messageId,
+        receipt.processedAt,
+      );
+  }
+
   // ─── Events ───────────────────────────────────────────────────────────────
 
   public async appendEvent(event: DomainEvent): Promise<void> {
@@ -559,8 +821,11 @@ export class SqliteRuntimeStore implements RuntimeStore {
       'runs',
       'workflow_runs',
       'agent_sessions',
+      'agent_session_runtime_bindings',
       'workspaces',
       'interventions',
+      'channel_message_correlations',
+      'channel_inbound_receipts',
       'events',
     ];
     const counts: Record<string, number> = {};
@@ -632,6 +897,7 @@ interface TaskRow {
   project_id: string;
   title: string;
   description: string | null;
+  labels_json: string | null;
   status: string;
   tracker_provider: string | null;
   tracker_id: string | null;
@@ -650,6 +916,12 @@ function taskFromRow(r: TaskRow): Task {
     updatedAt: r.updated_at,
   };
   if (r.description) Object.assign(base, { description: r.description });
+  if (r.labels_json) {
+    const labels = JSON.parse(r.labels_json) as unknown;
+    if (Array.isArray(labels) && labels.every((label) => typeof label === 'string')) {
+      Object.assign(base, { labels });
+    }
+  }
   if (r.tracker_provider && r.tracker_id) {
     const ref: Task['trackerReference'] = r.tracker_url
       ? { provider: r.tracker_provider, id: r.tracker_id, url: r.tracker_url }
@@ -784,6 +1056,59 @@ function agentSessionFromRow(r: AgentSessionRow): AgentSession {
   return base;
 }
 
+interface AgentSessionRuntimeBindingRow {
+  session_id: string;
+  runtime_id: string;
+  runtime_kind: string;
+  profile_id: string;
+  profile_snapshot: string;
+  initial_prompt: string;
+  role_id: string | null;
+  model: string | null;
+  reasoning: string | null;
+  last_activity_at: string;
+  last_error: string | null;
+  usage: string | null;
+  source_session_id: string | null;
+  source_action: string | null;
+  control_request_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function agentSessionRuntimeBindingFromRow(
+  r: AgentSessionRuntimeBindingRow,
+): AgentSessionRuntimeBinding {
+  const binding: AgentSessionRuntimeBinding = {
+    sessionId: r.session_id as AgentSessionId,
+    runtimeId: r.runtime_id,
+    runtimeKind: r.runtime_kind,
+    profileId: r.profile_id,
+    profileSnapshot: JSON.parse(r.profile_snapshot) as unknown,
+    initialPrompt: r.initial_prompt,
+    lastActivityAt: r.last_activity_at,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+  if (r.role_id) Object.assign(binding, { roleId: r.role_id });
+  if (r.model) Object.assign(binding, { model: r.model });
+  if (r.reasoning) Object.assign(binding, { reasoning: r.reasoning });
+  if (r.last_error) Object.assign(binding, { lastError: r.last_error });
+  if (r.usage) {
+    Object.assign(binding, { usage: JSON.parse(r.usage) as Readonly<Record<string, number>> });
+  }
+  if (r.source_session_id) {
+    Object.assign(binding, { sourceSessionId: r.source_session_id as AgentSessionId });
+  }
+  if (r.source_action) {
+    Object.assign(binding, {
+      sourceAction: r.source_action as AgentSessionRuntimeBinding['sourceAction'],
+    });
+  }
+  if (r.control_request_id) Object.assign(binding, { controlRequestId: r.control_request_id });
+  return binding;
+}
+
 interface WorkspaceRow {
   id: string;
   project_id: string;
@@ -871,6 +1196,47 @@ function configFromRow(r: ConfigRow): Configuration {
   };
   if (r.project_id) Object.assign(base, { projectId: r.project_id as ProjectId });
   return base;
+}
+
+interface ChannelMessageCorrelationRow {
+  transport_id: string;
+  message_id: string;
+  channel: string;
+  conversation_id: string;
+  intervention_id: string;
+  code: string;
+  sent_at: string;
+  active: number;
+}
+
+function channelMessageCorrelationFromRow(
+  r: ChannelMessageCorrelationRow,
+): ChannelMessageCorrelation {
+  return {
+    transportId: r.transport_id,
+    messageId: r.message_id as ChannelMessageId,
+    address: { channel: r.channel, conversationId: r.conversation_id },
+    interventionId: r.intervention_id as InterventionId,
+    code: r.code,
+    sentAt: r.sent_at,
+    active: r.active === 1,
+  };
+}
+
+function channelCorrelationKey(
+  transportId: string,
+  address: ChannelAddress,
+  messageId: ChannelMessageId,
+): string {
+  return `${transportId}\u0000${address.channel}\u0000${address.conversationId}\u0000${messageId}`;
+}
+
+/** Defense-in-depth: no caller may persist an unredacted resumable prompt. */
+export function redactStoredPrompt(value: string): string {
+  return value
+    .replace(/\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/gu, '[REDACTED]')
+    .replace(/((?:bearer|token|api[_-]?key|secret|password)\s*[:=]\s*)\S+/giu, '$1[REDACTED]')
+    .replace(/([?&](?:token|api[_-]?key|secret|password)=)[^&\s]+/giu, '$1[REDACTED]');
 }
 
 interface EventRow {

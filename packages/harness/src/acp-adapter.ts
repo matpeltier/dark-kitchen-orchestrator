@@ -11,9 +11,14 @@
  * control args are separate from arbitrary runtime payload data.
  */
 
-import { spawn } from 'node:child_process';
 import type { AgentSessionId } from '@dark-kitchen/core';
 import { createAgentSessionId } from '@dark-kitchen/core';
+import {
+  controlArgument,
+  defineProcess,
+  executeProcess,
+  stdinPayload,
+} from '@dark-kitchen/process-execution';
 import type {
   HarnessEventHandler,
   HarnessRuntime,
@@ -21,7 +26,11 @@ import type {
   StartSessionInput,
 } from './contracts.js';
 import type { HarnessCapability } from './capabilities.js';
-import { makeCapabilitySet, requireCapability } from './capabilities.js';
+import {
+  makeCapabilitySet,
+  requireCapability,
+  UnsupportedCapabilityError,
+} from './capabilities.js';
 
 export interface AcpAdapterConfig {
   readonly id: string;
@@ -49,15 +58,7 @@ export interface AcpAdapterConfig {
   readonly capabilities?: readonly HarnessCapability[];
 }
 
-const DEFAULT_ACP_CAPABILITIES: HarnessCapability[] = [
-  'sessions.persistent',
-  'sessions.cancel',
-  'sessions.live-instructions',
-  'sessions.resume',
-  'model.selection',
-  'reasoning.selection',
-  'usage.reporting',
-];
+const DEFAULT_ACP_CAPABILITIES: HarnessCapability[] = ['sessions.cancel', 'model.selection'];
 
 export interface AcpSessionMetadata {
   readonly externalSessionId: string;
@@ -76,19 +77,29 @@ export interface AcpSessionMetadata {
  */
 export class AcpHarnessAdapter implements HarnessRuntime {
   public readonly id: string;
+  public readonly kind: string;
   public readonly capabilities: ReturnType<typeof makeCapabilitySet>;
   private readonly config: AcpAdapterConfig;
   private readonly sessions = new Map<AgentSessionId, AcpSessionState>();
   private readonly subscribers = new Map<AgentSessionId, Set<HarnessEventHandler>>();
+  private readonly lastEvents = new Map<AgentSessionId, Parameters<HarnessEventHandler>[0]>();
   private readonly metadata = new Map<AgentSessionId, AcpSessionMetadata>();
 
   public constructor(config: AcpAdapterConfig) {
     this.config = config;
     this.id = config.id;
-    this.capabilities = makeCapabilitySet(config.capabilities ?? DEFAULT_ACP_CAPABILITIES);
+    this.kind = config.profile;
+    const capabilities = config.capabilities ?? DEFAULT_ACP_CAPABILITIES;
+    for (const capability of capabilities) {
+      if (!DEFAULT_ACP_CAPABILITIES.includes(capability)) {
+        throw new UnsupportedCapabilityError(capability, config.id);
+      }
+    }
+    this.capabilities = makeCapabilitySet(capabilities);
   }
 
   public async startSession(input: StartSessionInput): Promise<HarnessSession> {
+    this.validateInputCapabilities(input);
     const sessionId = createAgentSessionId(
       `acp-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
@@ -99,66 +110,25 @@ export class AcpHarnessAdapter implements HarnessRuntime {
       taskId: input.taskId,
       workspaceId: input.workspaceId,
       profile: input.profile,
-      state: 'starting',
+      state: 'running',
+      controller: new AbortController(),
     };
     this.sessions.set(sessionId, session);
 
     // Build control args (bounded metadata only)
     const controlArgs = [
-      '--profile',
-      this.config.profile,
-      '--session-id',
-      sessionId,
-      '--output-format',
-      'ndjson',
+      '--format',
+      'json',
       ...(input.model ? ['--model', input.model] : []),
       ...(this.config.extraArgs ?? []),
+      this.config.profile,
+      'prompt',
+      '--session',
+      sessionId,
+      '--file',
+      '-',
     ];
 
-    const executable = this.config.executable ?? 'acpx';
-
-    // Spawn with shell:false; prompt travels via stdin
-    const child = spawn(executable, controlArgs, {
-      shell: false,
-      cwd: input.workspaceId ? undefined : (this.config.cwd ?? process.cwd()),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    Object.assign(session, { childProcess: child, outputBuffer: '' });
-
-    const handleOutput = (data: Buffer): void => {
-      const text = data.toString('utf8');
-      (session as AcpSessionState & { outputBuffer: string }).outputBuffer += text;
-      this.parseAcpEvents(sessionId, text);
-    };
-
-    child.stdout?.on('data', handleOutput);
-    child.stderr?.on('data', handleOutput);
-
-    child.on('error', (err) => {
-      this.mapError(sessionId, err);
-    });
-
-    child.on('close', (code) => {
-      if (session.state !== 'cancelled' && session.state !== 'completed') {
-        session.state = code === 0 ? 'completed' : 'failed';
-        this.emit(sessionId, {
-          sessionId,
-          state: session.state,
-          ...(code !== 0
-            ? { error: new Error(`ACP process exited with code ${code ?? 'null'}`) }
-            : {}),
-        });
-      }
-    });
-
-    // Write prompt payload to stdin
-    if (child.stdin) {
-      child.stdin.write(input.prompt, 'utf8');
-      child.stdin.end();
-    }
-
-    session.state = 'running';
     this.emit(sessionId, { sessionId, state: 'running' });
 
     const meta: AcpSessionMetadata = {
@@ -167,6 +137,7 @@ export class AcpHarnessAdapter implements HarnessRuntime {
       startedAt: new Date().toISOString(),
     };
     this.metadata.set(sessionId, meta);
+    void this.runCliSession(sessionId, session, input, controlArgs);
 
     const startResult: HarnessSession = { ...session };
     Object.assign(startResult, { externalSessionId: meta.externalSessionId });
@@ -174,22 +145,16 @@ export class AcpHarnessAdapter implements HarnessRuntime {
   }
 
   public async sendPrompt(sessionId: AgentSessionId, prompt: string): Promise<void> {
+    this.getSessionState(sessionId);
     requireCapability(this.capabilities, 'sessions.live-instructions', this.id);
-    const session = this.getSessionState(sessionId);
-    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> })
-      .childProcess;
-    if (child?.stdin?.writable) {
-      // Payload goes through stdin, not args
-      child.stdin.write(prompt + '\n', 'utf8');
-    }
+    void prompt;
   }
 
   public async cancelSession(sessionId: AgentSessionId): Promise<void> {
     requireCapability(this.capabilities, 'sessions.cancel', this.id);
-    const session = this.getSessionState(sessionId);
-    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> })
-      .childProcess;
-    child?.kill('SIGTERM');
+    const session = this.sessions.get(sessionId);
+    if (!session || isTerminalAcpState(session.state)) return;
+    session.controller.abort();
     session.state = 'cancelled';
     this.emit(sessionId, { sessionId, state: 'cancelled' });
   }
@@ -208,11 +173,10 @@ export class AcpHarnessAdapter implements HarnessRuntime {
 
   public async stopSession(sessionId: AgentSessionId): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
-    const child = (session as AcpSessionState & { childProcess?: ReturnType<typeof spawn> })
-      .childProcess;
-    child?.kill('SIGKILL');
+    if (!session || isTerminalAcpState(session.state)) return;
+    session.controller.abort();
     session.state = 'cancelled';
+    this.emit(sessionId, { sessionId, state: 'cancelled' });
   }
 
   public async getSession(sessionId: AgentSessionId): Promise<HarnessSession | undefined> {
@@ -226,8 +190,15 @@ export class AcpHarnessAdapter implements HarnessRuntime {
   }
 
   public subscribe(sessionId: AgentSessionId, handler: HarnessEventHandler): () => void {
+    this.getSessionState(sessionId);
     if (!this.subscribers.has(sessionId)) this.subscribers.set(sessionId, new Set());
     this.subscribers.get(sessionId)!.add(handler);
+    const lastEvent = this.lastEvents.get(sessionId);
+    if (lastEvent && isTerminalAcpState(lastEvent.state)) {
+      queueMicrotask(() => {
+        if (this.lastEvents.get(sessionId) === lastEvent) handler(lastEvent);
+      });
+    }
     return () => {
       this.subscribers.get(sessionId)?.delete(handler);
     };
@@ -245,75 +216,74 @@ export class AcpHarnessAdapter implements HarnessRuntime {
     return s;
   }
 
-  private parseAcpEvents(sessionId: AgentSessionId, text: string): void {
-    // Parse NDJSON ACP events and map to Dark Kitchen states.
-    // Each line is a JSON object; we handle recognized event types.
-    const lines = text.split('\n').filter((l) => l.trim());
-    for (const line of lines) {
-      try {
-        const event = JSON.parse(line) as AcpEvent;
-        this.handleAcpEvent(sessionId, event);
-      } catch {
-        // Not JSON – ignore or treat as plain output
-      }
-    }
-  }
-
-  private handleAcpEvent(sessionId: AgentSessionId, event: AcpEvent): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-
-    switch (event.type) {
-      case 'session.start':
-        if (event.externalId) session.externalSessionId = event.externalId;
-        break;
-      case 'activity':
-        if (event.content) {
-          this.emit(sessionId, { sessionId, state: 'running', output: event.content });
-        } else {
-          this.emit(sessionId, { sessionId, state: 'running' });
-        }
-        break;
-      case 'tool.call':
-        this.emit(sessionId, { sessionId, state: 'running' });
-        break;
-      case 'session.complete':
+  private async runCliSession(
+    sessionId: AgentSessionId,
+    session: AcpSessionState,
+    input: StartSessionInput,
+    controlArgs: readonly string[],
+  ): Promise<void> {
+    try {
+      const result = await executeProcess({
+        definition: defineProcess({
+          executable: this.config.executable ?? 'acpx',
+          args: controlArgs.map(controlArgument),
+          label: this.id,
+        }),
+        cwd: this.config.cwd ?? (input.workspaceId as string),
+        payload: stdinPayload(
+          input.instructions ? `${input.instructions}\n\n${input.prompt}` : input.prompt,
+        ),
+        signal: session.controller.signal,
+      });
+      if (session.controller.signal.aborted || session.state === 'cancelled') return;
+      const stdout = Buffer.from(result.stdout).toString('utf8');
+      const stderr = Buffer.from(result.stderr).toString('utf8');
+      if (result.exitCode === 0) {
         session.state = 'completed';
-        if (event.content) {
-          this.emit(sessionId, { sessionId, state: 'completed', output: event.content });
-        } else {
-          this.emit(sessionId, { sessionId, state: 'completed' });
-        }
-        break;
-      case 'session.error':
+        this.emit(sessionId, { sessionId, state: 'completed', output: stdout });
+      } else {
         session.state = 'failed';
         this.emit(sessionId, {
           sessionId,
           state: 'failed',
-          error: new Error(event.message ?? 'ACP session error'),
+          error: classifyAcpCliError(
+            stderr || `ACP process exited with code ${String(result.exitCode)}`,
+          ),
         });
-        break;
-      case 'auth.error':
-      case 'quota.error':
-      case 'rate-limit':
-        session.state = 'failed';
-        this.emit(sessionId, {
-          sessionId,
-          state: 'failed',
-          error: new AcpOperationalError(event.type, event.message ?? event.type),
-        });
-        break;
+      }
+    } catch (error) {
+      if (session.controller.signal.aborted || session.state === 'cancelled') return;
+      session.state = 'failed';
+      this.emit(sessionId, { sessionId, state: 'failed', error });
     }
   }
 
-  private mapError(sessionId: AgentSessionId, err: Error): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    session.state = 'failed';
-    this.emit(sessionId, { sessionId, state: 'failed', error: err });
+  private validateInputCapabilities(input: StartSessionInput): void {
+    if (input.model || (input.profile.managed && input.profile.model)) {
+      requireCapability(this.capabilities, 'model.selection', this.id);
+    }
+    if (input.reasoning || (input.profile.managed && input.profile.reasoning)) {
+      requireCapability(this.capabilities, 'reasoning.selection', this.id);
+    }
+    if (
+      (input.profile.managed && (input.profile.skills?.length ?? 0) > 0) ||
+      (input.resources?.skills?.length ?? 0) > 0
+    ) {
+      requireCapability(this.capabilities, 'skills.custom', this.id);
+    }
+    if (
+      (input.profile.managed && (input.profile.mcpServers?.length ?? 0) > 0) ||
+      (input.resources?.mcpServers?.length ?? 0) > 0
+    ) {
+      requireCapability(this.capabilities, 'skills.mcp', this.id);
+    }
+    if (input.profile.managed && (input.profile.plugins?.length ?? 0) > 0) {
+      requireCapability(this.capabilities, 'skills.plugins', this.id);
+    }
   }
 
   private emit(sessionId: AgentSessionId, event: Parameters<HarnessEventHandler>[0]): void {
+    this.lastEvents.set(sessionId, event);
     for (const handler of this.subscribers.get(sessionId) ?? []) {
       handler(event);
     }
@@ -321,15 +291,7 @@ export class AcpHarnessAdapter implements HarnessRuntime {
 }
 
 interface AcpSessionState extends HarnessSession {
-  childProcess?: ReturnType<typeof spawn>;
-  outputBuffer?: string;
-}
-
-interface AcpEvent {
-  type: string;
-  externalId?: string;
-  content?: string | null;
-  message?: string;
+  readonly controller: AbortController;
 }
 
 export class AcpOperationalError extends Error {
@@ -339,4 +301,22 @@ export class AcpOperationalError extends Error {
     this.name = 'AcpOperationalError';
     this.errorType = errorType;
   }
+}
+
+function classifyAcpCliError(message: string): AcpOperationalError {
+  const lower = message.toLowerCase();
+  if (/auth|unauthorized|api[ -]?key|credential|token/.test(lower)) {
+    return new AcpOperationalError('auth', message);
+  }
+  if (/quota|credit|billing|insufficient/.test(lower)) {
+    return new AcpOperationalError('quota', message);
+  }
+  if (/rate.?limit|too many requests|\b429\b/.test(lower)) {
+    return new AcpOperationalError('rate-limit', message);
+  }
+  return new AcpOperationalError('process', message);
+}
+
+function isTerminalAcpState(state: HarnessSession['state']): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled';
 }

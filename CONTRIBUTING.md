@@ -6,8 +6,8 @@ Thank you for considering a contribution to Dark Kitchen!
 
 ```sh
 # Requires Node.js >= 22.13 and pnpm >= 10.14
-git clone https://github.com/your-org/dark-kitchen
-cd dark-kitchen
+git clone https://github.com/matpeltier/dark-kitchen-orchestrator.git
+cd dark-kitchen-orchestrator
 pnpm install --frozen-lockfile
 pnpm validate   # lint + format + typecheck + test + build
 ```

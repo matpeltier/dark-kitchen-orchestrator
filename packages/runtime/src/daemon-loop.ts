@@ -15,6 +15,8 @@ import type {
   InterventionKind,
 } from '@dark-kitchen/core';
 import { createRunId } from '@dark-kitchen/core';
+import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 
 function classifyInterventionKind(summary: string): InterventionKind {
   const lower = summary.toLowerCase();
@@ -29,6 +31,7 @@ function classifyInterventionKind(summary: string): InterventionKind {
 import type { RunSupervisor } from './scheduler.js';
 import type { InterventionService } from './interventions.js';
 import type { PrLifecycleOrchestrator } from './pr-lifecycle.js';
+import type { VerificationProof } from './pr-lifecycle.js';
 
 export interface DaemonLoopConfig {
   /** How often to poll the tracker for new/changed tasks (ms). */
@@ -39,14 +42,17 @@ export interface DaemonLoopConfig {
   readonly targetBranch?: string;
   readonly requiredChecks?: readonly string[];
   readonly autoMerge?: boolean;
+  readonly deleteHeadBranchAfterMerge?: boolean;
 }
 
 export interface DaemonDependencies {
   readonly supervisor: RunSupervisor;
   readonly getTaskGraph: () => Promise<{ tasks: Task[]; dependencies: TaskDependency[] }>;
-  readonly runWorkflowForTask: (taskId: TaskId, runId: RunId) => Promise<WorkflowOutcome>;
+  readonly runWorkflowForTask: (task: Task, runId: RunId) => Promise<WorkflowOutcome>;
   readonly lifecycleOrchestrator: PrLifecycleOrchestrator;
   readonly interventionService: InterventionService;
+  /** Cleanup boundary invoked only after merge/no-code completion is fully verified. */
+  readonly releaseWorktree?: (taskId: TaskId) => Promise<void>;
 }
 
 export interface WorkflowOutcome {
@@ -56,9 +62,19 @@ export interface WorkflowOutcome {
   readonly sourceBranch: string;
   readonly repositoryTestsPassed: boolean;
   readonly reviewPassed: boolean;
+  readonly worktreeClean?: boolean;
   readonly verificationGateSummary?: string;
   readonly evidenceRefs?: readonly string[];
+  readonly verificationResults?: readonly VerificationProof[];
+  readonly requiredVerificationProfiles?: readonly string[];
   readonly noCodeOutcome?: boolean;
+  /** Journal file path, deleted once the task completes (enables fresh re-runs). */
+  readonly journalPath?: string;
+}
+
+/** Deterministic, filesystem-safe run id for a task (enables journal replay). */
+export function runIdForTask(taskId: TaskId): string {
+  return `run-${taskId.replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase()}`;
 }
 
 /**
@@ -107,8 +123,10 @@ export class DaemonLoop {
       const { tasks, dependencies } = await this.deps.getTaskGraph();
       const newTaskIds = await this.deps.supervisor.tick(tasks, dependencies);
 
+      const taskById = new Map(tasks.map((t) => [t.id, t]));
       for (const taskId of newTaskIds) {
-        void this.runTask(taskId);
+        const task = taskById.get(taskId);
+        if (task) void this.runTask(task);
       }
     } catch (err) {
       // Tracker/network error — log and continue on next tick
@@ -116,24 +134,33 @@ export class DaemonLoop {
     }
   }
 
-  private async runTask(taskId: TaskId): Promise<void> {
-    const runId = createRunId(`run-${taskId}-${Date.now()}`);
+  private async runTask(task: Task): Promise<void> {
+    const taskId = task.id;
+    // A new execution after a resolved incident must be able to open a fresh
+    // intervention. Keep keys stable only within this execution attempt.
+    const executionId = randomUUID();
+    // Deterministic run id: the same task maps to the same run across daemon
+    // restarts, so the SQLite workflow journal can replay completed agent
+    // steps instead of re-running them from scratch.
+    const runId = createRunId(runIdForTask(taskId));
     this.activeTasks.set(taskId, runId);
 
     try {
-      const outcome = await this.deps.runWorkflowForTask(taskId, runId);
+      const outcome = await this.deps.runWorkflowForTask(task, runId);
 
       if (!outcome.success) {
         // Classify the failure kind from the error summary
         const kind = classifyInterventionKind(outcome.summary);
         await this.deps.interventionService.create({
-          scope: 'run',
-          targetId: runId,
+          scope: 'task',
+          targetId: taskId,
           kind,
           summary: `Workflow failed for task ${taskId}: ${outcome.summary}`,
-          deduplicationKey: `workflow-failure:${taskId}`,
+          deduplicationKey: `workflow-failure:${taskId}:${executionId}`,
         });
+        // Pause: don't auto-retry — wait for the human to reply retry/stop.
         this.deps.supervisor.failTask(taskId);
+        this.deps.supervisor.pauseTask(taskId);
         return;
       }
 
@@ -144,11 +171,15 @@ export class DaemonLoop {
           summary: outcome.summary,
           repositoryTestsPassed: outcome.repositoryTestsPassed,
           reviewPassed: outcome.reviewPassed,
+          ...(outcome.worktreeClean !== undefined ? { worktreeClean: outcome.worktreeClean } : {}),
           commits: outcome.commits,
           ...(outcome.verificationGateSummary
             ? { verificationGateSummary: outcome.verificationGateSummary }
             : {}),
           ...(outcome.evidenceRefs ? { evidenceRefs: outcome.evidenceRefs } : {}),
+          ...(outcome.verificationResults
+            ? { verificationResults: outcome.verificationResults }
+            : {}),
           ...(outcome.noCodeOutcome ? { noCodeOutcome: outcome.noCodeOutcome } : {}),
         },
         {
@@ -157,36 +188,64 @@ export class DaemonLoop {
           targetBranch: this.config.targetBranch ?? 'main',
           autoMerge: this.config.autoMerge ?? false,
           ...(this.config.requiredChecks ? { requiredChecks: this.config.requiredChecks } : {}),
+          ...(this.config.deleteHeadBranchAfterMerge !== undefined
+            ? { deleteHeadBranchAfterMerge: this.config.deleteHeadBranchAfterMerge }
+            : {}),
+          ...(outcome.requiredVerificationProfiles
+            ? { requiredVerificationProfiles: outcome.requiredVerificationProfiles }
+            : {}),
         },
+        this.deps.releaseWorktree,
       );
 
       if (lifecycleResult.state === 'merged' || lifecycleResult.state === 'no-code-outcome') {
         this.deps.supervisor.completeTask(taskId);
+        // The run is done — clear its journal so a future re-open starts fresh
+        // instead of replaying stale completed steps.
+        if (outcome.journalPath) {
+          await rm(outcome.journalPath, { force: true }).catch(() => {});
+        }
       } else if (lifecycleResult.state === 'awaiting-approval') {
         // PR is open, waiting for manual merge approval — keep task active
         // A follow-up tick will not re-schedule it (it's still "active")
       } else {
         // checks-failed, merge-refused, tracker-close-failed
         await this.deps.interventionService.create({
-          scope: 'run',
-          targetId: runId,
+          scope: 'task',
+          targetId: taskId,
           kind: 'agent-failure',
           summary: `PR lifecycle failed (${lifecycleResult.state}): ${lifecycleResult.errorMessage ?? 'unknown'}`,
-          deduplicationKey: `lifecycle-failure:${taskId}`,
+          deduplicationKey: `lifecycle-failure:${taskId}:${executionId}`,
         });
         this.deps.supervisor.failTask(taskId);
+        this.deps.supervisor.pauseTask(taskId);
       }
     } catch (err) {
+      if (isWorkflowInterventionRequired(err)) {
+        // The workflow already created a durable, human-visible gate. Preserve
+        // its deterministic run/worktree/journal and wait for Telegram/MCP to
+        // resume the task instead of creating a misleading failure incident.
+        this.deps.supervisor.failTask(taskId);
+        this.deps.supervisor.pauseTask(taskId);
+        return;
+      }
       await this.deps.interventionService.create({
-        scope: 'run',
-        targetId: runId,
+        scope: 'task',
+        targetId: taskId,
         kind: 'agent-failure',
         summary: `Unexpected error for task ${taskId}: ${String(err)}`,
-        deduplicationKey: `error:${taskId}`,
+        deduplicationKey: `error:${taskId}:${executionId}`,
       });
       this.deps.supervisor.failTask(taskId);
+      this.deps.supervisor.pauseTask(taskId);
     } finally {
       this.activeTasks.delete(taskId);
     }
   }
+}
+
+function isWorkflowInterventionRequired(error: unknown): boolean {
+  return (
+    error instanceof Error && error.name === 'WorkflowInterventionRequired' && 'outcome' in error
+  );
 }

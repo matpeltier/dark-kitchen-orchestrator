@@ -188,6 +188,70 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    name: 'durable-session-ownership-and-channel-correlation',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_session_runtime_bindings (
+          session_id TEXT PRIMARY KEY NOT NULL,
+          runtime_id TEXT NOT NULL,
+          runtime_kind TEXT NOT NULL,
+          profile_id TEXT NOT NULL,
+          profile_snapshot TEXT NOT NULL,
+          initial_prompt TEXT NOT NULL,
+          role_id TEXT,
+          model TEXT,
+          reasoning TEXT,
+          last_activity_at TEXT NOT NULL,
+          last_error TEXT,
+          usage TEXT,
+          source_session_id TEXT,
+          source_action TEXT,
+          control_request_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_binding_replacement
+          ON agent_session_runtime_bindings(source_session_id, source_action, profile_id)
+          WHERE source_session_id IS NOT NULL AND source_action IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_binding_control_request
+          ON agent_session_runtime_bindings(control_request_id)
+          WHERE control_request_id IS NOT NULL;
+
+        ALTER TABLE channel_message_correlations
+          ADD COLUMN transport_id TEXT NOT NULL DEFAULT 'legacy';
+        ALTER TABLE channel_message_correlations ADD COLUMN message_id TEXT;
+        ALTER TABLE channel_message_correlations ADD COLUMN code TEXT;
+        ALTER TABLE channel_message_correlations ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
+        UPDATE channel_message_correlations SET message_id = id WHERE message_id IS NULL;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_correlation_lookup
+          ON channel_message_correlations(transport_id, channel, conversation_id, message_id);
+        CREATE INDEX IF NOT EXISTS idx_channel_correlation_intervention
+          ON channel_message_correlations(intervention_id, active);
+        CREATE INDEX IF NOT EXISTS idx_channel_correlation_conversation
+          ON channel_message_correlations(transport_id, channel, conversation_id, active);
+
+        CREATE TABLE IF NOT EXISTS channel_inbound_receipts (
+          transport_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          conversation_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          processed_at TEXT NOT NULL,
+          PRIMARY KEY (transport_id, channel, conversation_id, message_id)
+        );
+      `);
+    },
+  },
+  {
+    version: 3,
+    name: 'normalized-task-labels',
+    up(db) {
+      db.exec(`ALTER TABLE tasks ADD COLUMN labels_json TEXT;`);
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

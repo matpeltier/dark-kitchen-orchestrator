@@ -16,6 +16,7 @@
   "dependencies": {
     "@dark-kitchen/core": "workspace:*",
     "@dark-kitchen/harness": "workspace:*",
+    "@dark-kitchen/process-execution": "workspace:*",
     "@dark-kitchen/runtime-store-sqlite": "workspace:*",
     "@dark-kitchen/scm": "workspace:*",
     "@dark-kitchen/tracker": "workspace:*",

@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible Dark Kitchen defect
+title: '[Bug]: '
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the smallest safe config and commands that reproduce the issue. Remove all credentials.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Dark Kitchen version
+      placeholder: 0.1.1
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: macOS 15, Node 22.13, pnpm 10.14
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or evidence
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed tokens, credentials, private repository names, and personal data.
+          required: true

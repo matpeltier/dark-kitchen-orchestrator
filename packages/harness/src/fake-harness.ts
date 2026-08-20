@@ -23,6 +23,8 @@ export interface FakeHarnessResponse {
 
 export interface FakeHarnessConfig {
   readonly id: string;
+  /** Adapter kind matched by profiles. Defaults to `id`. */
+  readonly kind?: string;
   readonly capabilities: HarnessCapabilitySet;
   /** Default response for all prompts. */
   readonly defaultResponse?: FakeHarnessResponse;
@@ -32,14 +34,18 @@ export interface FakeHarnessConfig {
 
 export class FakeHarnessRuntime implements HarnessRuntime {
   public readonly id: string;
+  public readonly kind: string;
   public readonly capabilities: HarnessCapabilitySet;
   private readonly config: FakeHarnessConfig;
   private readonly sessions = new Map<AgentSessionId, FakeSession>();
   private readonly subscribers = new Map<AgentSessionId, Set<HarnessEventHandler>>();
+  private readonly timers = new Map<AgentSessionId, ReturnType<typeof setTimeout>>();
+  private readonly lastEvents = new Map<AgentSessionId, Parameters<HarnessEventHandler>[0]>();
 
   public constructor(config: FakeHarnessConfig) {
     this.config = config;
     this.id = config.id;
+    this.kind = config.kind ?? config.id;
     this.capabilities = config.capabilities;
   }
 
@@ -61,10 +67,12 @@ export class FakeHarnessRuntime implements HarnessRuntime {
     const response = this.config.responses?.get(input.prompt) ?? this.config.defaultResponse;
     if (response) {
       const delay = response.delayMs ?? 0;
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        if (session.state === 'cancelled') return;
         session.state = response.state ?? 'completed';
         this.emit(sessionId, { sessionId, state: session.state, output: response.output });
       }, delay);
+      this.timers.set(sessionId, timer);
     }
 
     return { ...session };
@@ -77,7 +85,9 @@ export class FakeHarnessRuntime implements HarnessRuntime {
     const response = this.config.responses?.get(prompt) ?? this.config.defaultResponse;
     if (response) {
       setTimeout(() => {
-        this.emit(sessionId, { sessionId, state: 'completed', output: response.output });
+        if (session.state === 'cancelled') return;
+        session.state = response.state ?? 'completed';
+        this.emit(sessionId, { sessionId, state: session.state, output: response.output });
       }, response.delayMs ?? 0);
     }
   }
@@ -85,7 +95,9 @@ export class FakeHarnessRuntime implements HarnessRuntime {
   public async cancelSession(sessionId: AgentSessionId): Promise<void> {
     requireCapability(this.capabilities, 'sessions.cancel', this.id);
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session || isTerminalState(session.state)) return;
+    const timer = this.timers.get(sessionId);
+    if (timer) clearTimeout(timer);
     session.state = 'cancelled';
     this.emit(sessionId, { sessionId, state: 'cancelled' });
   }
@@ -100,8 +112,11 @@ export class FakeHarnessRuntime implements HarnessRuntime {
 
   public async stopSession(sessionId: AgentSessionId): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session || isTerminalState(session.state)) return;
+    const timer = this.timers.get(sessionId);
+    if (timer) clearTimeout(timer);
     session.state = 'cancelled';
+    this.emit(sessionId, { sessionId, state: 'cancelled' });
   }
 
   public async getSession(sessionId: AgentSessionId): Promise<HarnessSession | undefined> {
@@ -110,20 +125,32 @@ export class FakeHarnessRuntime implements HarnessRuntime {
   }
 
   public subscribe(sessionId: AgentSessionId, handler: HarnessEventHandler): () => void {
+    if (!this.sessions.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
     if (!this.subscribers.has(sessionId)) {
       this.subscribers.set(sessionId, new Set());
     }
     this.subscribers.get(sessionId)!.add(handler);
+    const lastEvent = this.lastEvents.get(sessionId);
+    if (lastEvent && isTerminalState(lastEvent.state)) {
+      queueMicrotask(() => {
+        if (this.lastEvents.get(sessionId) === lastEvent) handler(lastEvent);
+      });
+    }
     return () => {
       this.subscribers.get(sessionId)?.delete(handler);
     };
   }
 
   private emit(sessionId: AgentSessionId, event: Parameters<HarnessEventHandler>[0]): void {
+    this.lastEvents.set(sessionId, event);
     for (const handler of this.subscribers.get(sessionId) ?? []) {
       handler(event);
     }
   }
+}
+
+function isTerminalState(state: HarnessSession['state']): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled';
 }
 
 interface FakeSession extends HarnessSession {

@@ -33,6 +33,7 @@ function detectInlineSecrets(config: DarkKitchenConfig): string[] {
   }
   for (const channel of config.channels ?? []) {
     checkTokenField(channel.tokenEnv, `channel[${channel.id}].tokenEnv`);
+    checkTokenField(channel.webhookSecretEnv, `channel[${channel.id}].webhookSecretEnv`);
   }
 
   return findings;
@@ -62,9 +63,30 @@ function validateReferences(config: DarkKitchenConfig): string[] {
   const roleIds = new Set((config.roles ?? []).map((r) => r.id));
   const harnessProfileIds = new Set((config.harnessProfiles ?? []).map((h) => h.id));
   const verificationProfileIds = new Set((config.verificationProfiles ?? []).map((v) => v.id));
-  const capabilityIds = new Set((config.capabilityProviders ?? []).map((c) => c.id));
+  const semanticCapabilityIds = new Set(
+    (config.capabilityProviders ?? []).map((provider) => provider.capability),
+  );
   const channelIds = new Set((config.channels ?? []).map((c) => c.id));
   const workflowIds = new Set((config.workflows ?? []).map((w) => w.id));
+
+  for (const channel of config.channels ?? []) {
+    if (channel.telegramMode && channel.kind !== 'telegram') {
+      errors.push(`Channel "${channel.id}" sets telegramMode but is not a Telegram channel`);
+    }
+    if (channel.kind === 'telegram' && channel.telegramMode === 'webhook') {
+      if (!channel.url?.startsWith('https://')) {
+        errors.push(`Telegram channel "${channel.id}" webhook mode requires an HTTPS url`);
+      }
+      if (!channel.webhookSecretEnv) {
+        errors.push(`Telegram channel "${channel.id}" webhook mode requires webhookSecretEnv`);
+      }
+    }
+    if (channel.kind === 'telegram' && !channel.defaultTarget) {
+      errors.push(
+        `Telegram channel "${channel.id}" requires defaultTarget as its outbound destination and inbound chat allowlist`,
+      );
+    }
+  }
 
   // Roles must reference existing harness profiles
   for (const role of config.roles ?? []) {
@@ -84,12 +106,13 @@ function validateReferences(config: DarkKitchenConfig): string[] {
     }
   }
 
-  // Verification profiles: requiredCapabilities must reference known providers
+  // Verification profiles reference stable semantic capability IDs. Provider
+  // IDs are deployment-local aliases and must not leak into portable profiles.
   for (const vp of config.verificationProfiles ?? []) {
-    for (const capRef of vp.requiredCapabilities ?? []) {
-      if (!capabilityIds.has(capRef)) {
+    for (const capRef of [...(vp.requiredCapabilities ?? []), ...(vp.tools ?? [])]) {
+      if (!semanticCapabilityIds.has(capRef)) {
         errors.push(
-          `VerificationProfile "${vp.id}" requires unknown capability provider "${capRef}"`,
+          `VerificationProfile "${vp.id}" requires semantic capability "${capRef}", but no configured provider declares it`,
         );
       }
     }
@@ -97,6 +120,18 @@ function validateReferences(config: DarkKitchenConfig): string[] {
       errors.push(
         `VerificationProfile "${vp.id}" references unknown verifierRoleId "${vp.verifierRoleId}"`,
       );
+    }
+    if ((vp.skills?.length ?? 0) > 0 || (vp.mcpServers?.length ?? 0) > 0) {
+      const verifierRoleId = vp.verifierRoleId ?? 'verifier';
+      const verifierRole = (config.roles ?? []).find((role) => role.id === verifierRoleId);
+      const verifierHarness = (config.harnessProfiles ?? []).find(
+        (profile) => profile.id === verifierRole?.harnessProfileId,
+      );
+      if (verifierHarness?.managed === false) {
+        errors.push(
+          `VerificationProfile "${vp.id}" cannot inject skills/MCP into user-managed harness profile "${verifierHarness.id}"; configure those resources in the harness itself`,
+        );
+      }
     }
   }
 
@@ -110,6 +145,13 @@ function validateReferences(config: DarkKitchenConfig): string[] {
     for (const vpRef of wf.verificationProfiles ?? []) {
       if (!verificationProfileIds.has(vpRef)) {
         errors.push(`Workflow "${wf.id}" references unknown verificationProfile "${vpRef}"`);
+      }
+    }
+    for (const vpRef of wf.taskSelector?.verificationProfilesAny ?? []) {
+      if (!verificationProfileIds.has(vpRef)) {
+        errors.push(
+          `Workflow "${wf.id}" selector references unknown verificationProfile "${vpRef}"`,
+        );
       }
     }
   }
@@ -161,7 +203,17 @@ export function validateConfig(raw: unknown): DarkKitchenConfig {
     ...collectDuplicates(parsed.workflows, (w) => w.id, 'workflow'),
   ];
 
-  const allErrors = [...duplicateErrors, ...referenceErrors, ...secretErrors];
+  const workflowDefaultErrors =
+    (parsed.workflows ?? []).filter((workflow) => workflow.default).length > 1
+      ? ['Only one workflow may be configured as the default.']
+      : [];
+
+  const allErrors = [
+    ...duplicateErrors,
+    ...workflowDefaultErrors,
+    ...referenceErrors,
+    ...secretErrors,
+  ];
 
   if (allErrors.length > 0) {
     throw new ConfigValidationError(

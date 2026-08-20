@@ -8,5 +8,9 @@
     "rootDir": "src"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../core" }, { "path": "../harness" }]
+  "references": [
+    { "path": "../core" },
+    { "path": "../process-execution" },
+    { "path": "../harness" }
+  ]
 }

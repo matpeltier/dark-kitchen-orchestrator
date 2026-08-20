@@ -4,3 +4,10 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 *.log
+
+# Dark Kitchen runtime
+.dark-kitchen/runtime/
+.dark-kitchen/.env
+
+# Local agent/editor workspace markers
+.freebuff/

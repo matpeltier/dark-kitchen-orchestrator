@@ -1,9 +1,8 @@
 /**
  * GitHub Issues tracker adapter.
  *
- * Uses native GitHub issue sub-issues/blocking relationships (not Markdown
- * body conventions). Sub-issues API is used when available; falls back to
- * the `development` timeline or issue relations API.
+ * Uses GitHub's native issue dependency API. Tracker bodies are never used as
+ * a dependency database and native API failures fail closed.
  */
 
 import { Octokit } from '@octokit/rest';
@@ -22,6 +21,7 @@ import type {
   CommentInput,
   CreateTaskInput,
   FullTrackerAdapter,
+  TrackerComment,
   TrackerTaskUpdate,
 } from './contracts.js';
 import { CyclicDependencyError, TrackerError, wouldCreateCycle } from './contracts.js';
@@ -44,11 +44,6 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
   private readonly octokit: Octokit;
   private readonly config: GitHubIssuesAdapterConfig;
   private readonly labelPrefix: string;
-
-  // In-memory dependency store (native GitHub sub-issues API is used when available;
-  // this stores the normalized edges for cycle detection and listing).
-  private readonly dependencies = new Map<string, TaskDependency>();
-  private readonly depsByTask = new Map<TaskId, Set<string>>();
 
   public constructor(config: GitHubIssuesAdapterConfig, octokit?: Octokit) {
     this.config = config;
@@ -120,6 +115,23 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
     const issueNumber = requireIssueNumber(taskId);
     const state =
       update.status === 'completed' || update.status === 'cancelled' ? 'closed' : 'open';
+    // When a task returns to 'ready', swap the DK state label (e.g. dk:blocked)
+    // back to dk:ready so the scheduler picks it up again — mirror of setBlocked.
+    let labels: string[] | undefined;
+    if (update.status === 'ready') {
+      const { data: current } = await this.octokit.issues.get({
+        owner: this.config.owner,
+        repo: this.config.repo,
+        issue_number: issueNumber,
+      });
+      const currentLabels = (current.labels ?? [])
+        .map((l) => (typeof l === 'string' ? l : (l.name ?? '')))
+        .filter(Boolean);
+      labels = [
+        ...currentLabels.filter((l) => !l.startsWith(this.labelPrefix)),
+        `${this.labelPrefix}ready`,
+      ];
+    }
     const { data } = await this.octokit.issues.update({
       owner: this.config.owner,
       repo: this.config.repo,
@@ -127,7 +139,11 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
       ...(update.title !== undefined ? { title: update.title } : {}),
       ...(update.description !== undefined ? { body: update.description ?? '' } : {}),
       ...(update.status !== undefined ? { state } : {}),
-      ...(update.labels !== undefined ? { labels: [...update.labels] } : {}),
+      ...(labels !== undefined
+        ? { labels }
+        : update.labels !== undefined
+          ? { labels: [...update.labels] }
+          : {}),
     });
     return this.normalizeIssue(data);
   }
@@ -154,6 +170,34 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
     return this.normalizeIssue(data);
   }
 
+  public async setBlocked(taskId: TaskId): Promise<void> {
+    const issueNumber = requireIssueNumber(taskId);
+    const { data } = await this.octokit.issues.get({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      issue_number: issueNumber,
+    });
+    const current = (data.labels ?? [])
+      .map((l) => (typeof l === 'string' ? l : (l.name ?? '')))
+      .filter(Boolean);
+    const next = [
+      ...current.filter(
+        (l) =>
+          l !== 'dk:ready' &&
+          l !== 'dk:active' &&
+          l !== 'dk:running' &&
+          !l.startsWith('dk:blocked'),
+      ),
+      'dk:blocked',
+    ];
+    await this.octokit.issues.update({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      issue_number: issueNumber,
+      labels: next,
+    });
+  }
+
   public async addComment(input: CommentInput): Promise<void> {
     const issueNumber = requireIssueNumber(input.taskId);
     await this.octokit.issues.createComment({
@@ -164,48 +208,88 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
     });
   }
 
+  public async listComments(taskId: TaskId): Promise<readonly TrackerComment[]> {
+    const issueNumber = requireIssueNumber(taskId);
+    const { data } = await this.octokit.issues.listComments({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      issue_number: issueNumber,
+      per_page: 100,
+    });
+    return data.map((comment) => ({
+      id: String(comment.id),
+      taskId,
+      body: comment.body ?? '',
+      ...(comment.user?.login ? { author: comment.user.login } : {}),
+      createdAt: comment.created_at,
+      ...(comment.html_url ? { url: comment.html_url } : {}),
+    }));
+  }
+
+  public async setAutonomousApproval(taskId: TaskId, approved: boolean): Promise<Task> {
+    const issueNumber = requireIssueNumber(taskId);
+    const { data: current } = await this.octokit.issues.get({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      issue_number: issueNumber,
+    });
+    const labels = (current.labels ?? [])
+      .map((label) => (typeof label === 'string' ? label : (label.name ?? '')))
+      .filter((label) => Boolean(label) && !label.startsWith(this.labelPrefix));
+    if (approved) labels.push(`${this.labelPrefix}ready`);
+    const { data } = await this.octokit.issues.update({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      issue_number: issueNumber,
+      state: 'open',
+      labels,
+    });
+    return this.normalizeIssue(data);
+  }
+
   public async addDependency(input: AddDependencyInput): Promise<TaskDependency> {
-    // Build the current dependency graph for cycle detection
-    const graph = this.buildDependencyGraph();
+    const graph = await this.loadNativeDependencyGraph();
     if (wouldCreateCycle(graph, input.taskId, input.dependsOnTaskId)) {
       throw new CyclicDependencyError(input.taskId, input.dependsOnTaskId);
     }
 
     const depId = createTaskDependencyId(`${PROVIDER}:${input.taskId}->${input.dependsOnTaskId}`);
-
-    // Use GitHub's native sub-issues API when available, or add a body comment.
-    // Native "blocked by" relationship via GitHub's issue link API.
-    await this.addGitHubBlockingRelationship(input.taskId, input.dependsOnTaskId);
-
     const dep: TaskDependency = {
       id: depId,
       taskId: input.taskId,
       dependsOnTaskId: input.dependsOnTaskId,
       kind: input.kind ?? 'blocks',
     };
-
-    this.dependencies.set(depId, dep);
-    if (!this.depsByTask.has(input.taskId)) {
-      this.depsByTask.set(input.taskId, new Set());
+    const existing = await this.listDependencies(input.taskId);
+    if (existing.some((candidate) => candidate.dependsOnTaskId === input.dependsOnTaskId)) {
+      return dep;
     }
-    this.depsByTask.get(input.taskId)!.add(depId);
-
+    await this.addGitHubBlockingRelationship(input.taskId, input.dependsOnTaskId);
     return dep;
   }
 
   public async removeDependency(dependencyId: TaskDependencyId): Promise<void> {
-    const dep = this.dependencies.get(dependencyId);
-    if (!dep) return;
-    this.depsByTask.get(dep.taskId)?.delete(dependencyId);
-    this.dependencies.delete(dependencyId);
+    const dep = parseDependencyId(dependencyId);
+    if (!dep) throw new TrackerError(`Invalid GitHub dependency ID: ${dependencyId}`);
+    const existing = await this.listDependencies(dep.taskId);
+    if (!existing.some((candidate) => candidate.dependsOnTaskId === dep.dependsOnTaskId)) return;
     await this.removeGitHubBlockingRelationship(dep.taskId, dep.dependsOnTaskId);
   }
 
   public async listDependencies(taskId: TaskId): Promise<readonly TaskDependency[]> {
-    const depIds = this.depsByTask.get(taskId) ?? new Set<string>();
-    return [...depIds]
-      .map((id) => this.dependencies.get(id))
-      .filter((d): d is TaskDependency => d !== undefined);
+    const issueNumber = requireIssueNumber(taskId);
+    const blockedBy = await this.requestNativeDependencies(issueNumber);
+    return blockedBy.map((issue) => {
+      const dependsOnTaskId = createTaskId(
+        `${PROVIDER}:${this.config.owner}/${this.config.repo}#${String(issue.number)}`,
+      );
+      return {
+        id: createTaskDependencyId(`${PROVIDER}:${taskId}->${dependsOnTaskId}`),
+        taskId,
+        dependsOnTaskId,
+        kind: 'blocks' as const,
+      };
+    });
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
@@ -229,6 +313,10 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
       createdAt: issue.created_at,
       updatedAt: issue.updated_at,
     };
+    const labels = (issue.labels ?? [])
+      .map((label) => (typeof label === 'string' ? label : (label.name ?? '')))
+      .filter(Boolean);
+    if (labels.length > 0) Object.assign(base, { labels });
     if (issue.body) Object.assign(base, { description: issue.body });
     return base;
   }
@@ -239,17 +327,22 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
     const dkLabel = labels.find((l) => l.startsWith(this.labelPrefix));
     if (dkLabel) {
       const state = dkLabel.slice(this.labelPrefix.length);
+      if (state === 'ready') return 'ready';
       if (state === 'active' || state === 'running') return 'active';
       if (state === 'blocked') return 'blocked';
     }
     return 'backlog';
   }
 
-  private buildDependencyGraph(): Map<TaskId, Set<TaskId>> {
+  private async loadNativeDependencyGraph(): Promise<Map<TaskId, Set<TaskId>>> {
     const graph = new Map<TaskId, Set<TaskId>>();
-    for (const dep of this.dependencies.values()) {
-      if (!graph.has(dep.taskId)) graph.set(dep.taskId, new Set());
-      graph.get(dep.taskId)!.add(dep.dependsOnTaskId);
+    const tasks = await this.listTasks(
+      createProjectId(`${PROVIDER}:${this.config.owner}/${this.config.repo}`),
+    );
+    for (const task of tasks) {
+      const dependencies = await this.listDependencies(task.id);
+      if (dependencies.length === 0) continue;
+      graph.set(task.id, new Set(dependencies.map((dependency) => dependency.dependsOnTaskId)));
     }
     return graph;
   }
@@ -258,41 +351,77 @@ export class GitHubIssuesAdapter implements FullTrackerAdapter {
     taskId: TaskId,
     dependsOnTaskId: TaskId,
   ): Promise<void> {
-    // GitHub's native issue relations API (beta) — add a "blocked by" relationship.
-    // Falls back gracefully if the API is unavailable.
-    try {
-      const blockerNumber = extractIssueNumber(dependsOnTaskId);
-      const blockedNumber = extractIssueNumber(taskId);
-      if (blockerNumber === null || blockedNumber === null) return;
-
-      // Use GraphQL sub-issues API (GitHub Projects v2 / issue relations)
-      await this.octokit
-        .graphql(
-          `mutation AddIssueRelation($subjectId: ID!, $objectId: ID!, $relationType: IssueRelationType!) {
-          addSubIssue(input: { issueId: $subjectId, subIssueId: $objectId }) {
-            issue { id }
-          }
-        }`,
-          {
-            // These are placeholder variables; in production, use actual node IDs.
-            subjectId: blockedNumber,
-            objectId: blockerNumber,
-            relationType: 'BLOCKED_BY',
-          },
-        )
-        .catch(() => {
-          // Sub-issues API may not be available; dependency is stored locally.
-        });
-    } catch {
-      // API not available — local storage only
-    }
+    const blockerNumber = requireIssueNumber(dependsOnTaskId);
+    const blockedNumber = requireIssueNumber(taskId);
+    const { data: blocker } = await this.octokit.issues.get({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      issue_number: blockerNumber,
+    });
+    await this.octokit.request(
+      'POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by',
+      {
+        owner: this.config.owner,
+        repo: this.config.repo,
+        issue_number: blockedNumber,
+        issue_id: blocker.id,
+        headers: {
+          accept: 'application/vnd.github+json',
+          'x-github-api-version': '2026-03-10',
+        },
+      },
+    );
   }
 
   private async removeGitHubBlockingRelationship(
-    _taskId: TaskId,
-    _dependsOnTaskId: TaskId,
+    taskId: TaskId,
+    dependsOnTaskId: TaskId,
   ): Promise<void> {
-    // Symmetric removal via GraphQL — best-effort
+    const blockerNumber = requireIssueNumber(dependsOnTaskId);
+    const blockedNumber = requireIssueNumber(taskId);
+    const { data: blocker } = await this.octokit.issues.get({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      issue_number: blockerNumber,
+    });
+    await this.octokit.request(
+      'DELETE /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by/{issue_id}',
+      {
+        owner: this.config.owner,
+        repo: this.config.repo,
+        issue_number: blockedNumber,
+        issue_id: blocker.id,
+        headers: {
+          accept: 'application/vnd.github+json',
+          'x-github-api-version': '2026-03-10',
+        },
+      },
+    );
+  }
+
+  private async requestNativeDependencies(
+    issueNumber: number,
+  ): Promise<readonly { readonly id: number; readonly number: number }[]> {
+    const response = await this.octokit.request(
+      'GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by',
+      {
+        owner: this.config.owner,
+        repo: this.config.repo,
+        issue_number: issueNumber,
+        per_page: 100,
+        headers: {
+          accept: 'application/vnd.github+json',
+          'x-github-api-version': '2026-03-10',
+        },
+      },
+    );
+    if (!Array.isArray(response.data)) {
+      throw new TrackerError('GitHub returned an invalid native dependency response.');
+    }
+    return response.data.map((issue) => ({
+      id: Number((issue as { id: unknown }).id),
+      number: Number((issue as { number: unknown }).number),
+    }));
   }
 }
 
@@ -318,6 +447,19 @@ function requireIssueNumber(taskId: TaskId): number {
   const n = extractIssueNumber(taskId);
   if (n === null) throw new TrackerError(`Cannot extract issue number from task ID: ${taskId}`);
   return n;
+}
+
+function parseDependencyId(
+  dependencyId: TaskDependencyId,
+): { readonly taskId: TaskId; readonly dependsOnTaskId: TaskId } | undefined {
+  const prefix = `${PROVIDER}:`;
+  if (!dependencyId.startsWith(prefix)) return undefined;
+  const parts = dependencyId.slice(prefix.length).split('->');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return undefined;
+  return {
+    taskId: createTaskId(parts[0]),
+    dependsOnTaskId: createTaskId(parts[1]),
+  };
 }
 
 // ─── Mock adapter for testing ────────────────────────────────────────────────
@@ -408,17 +550,42 @@ export class MockTrackerAdapter implements FullTrackerAdapter {
   }
 
   public async reopenTask(taskId: TaskId): Promise<Task> {
+    return this.updateTask(taskId, { status: 'backlog' });
+  }
+
+  public async setBlocked(taskId: TaskId): Promise<void> {
     const n = requireIssueNumber(taskId);
     const issue = this.issues.get(n);
     if (!issue) throw new TrackerError(`Issue #${n} not found`);
-    issue.state = 'open';
-    return normalizeLocalIssue(issue, String(n));
+    issue.labels = [...(issue.labels ?? []).filter((l) => l !== 'dk:ready'), 'dk:blocked'];
   }
 
   public async addComment(input: CommentInput): Promise<void> {
     const n = requireIssueNumber(input.taskId);
     if (!this.comments.has(n)) this.comments.set(n, []);
     this.comments.get(n)!.push(input.body);
+  }
+
+  public async listComments(taskId: TaskId): Promise<readonly TrackerComment[]> {
+    const n = requireIssueNumber(taskId);
+    const now = new Date().toISOString();
+    return (this.comments.get(n) ?? []).map((body, index) => ({
+      id: `mock:${n}:comment:${index + 1}`,
+      taskId,
+      body,
+      author: 'mock',
+      createdAt: now,
+    }));
+  }
+
+  public async setAutonomousApproval(taskId: TaskId, approved: boolean): Promise<Task> {
+    const n = requireIssueNumber(taskId);
+    const issue = this.issues.get(n);
+    if (!issue) throw new TrackerError(`Issue #${n} not found`);
+    issue.state = 'open';
+    issue.labels = (issue.labels ?? []).filter((label) => !label.startsWith('dk:'));
+    if (approved) issue.labels.push('dk:ready');
+    return normalizeLocalIssue(issue, String(n));
   }
 
   public async addDependency(input: AddDependencyInput): Promise<TaskDependency> {
@@ -482,11 +649,19 @@ function normalizeLocalIssue(issue: MockIssue, refId: string): Task {
     id: taskId,
     projectId,
     title: issue.title,
-    status: issue.state === 'closed' ? 'completed' : 'backlog',
+    status:
+      issue.state === 'closed'
+        ? 'completed'
+        : issue.labels?.includes('dk:ready')
+          ? 'ready'
+          : issue.labels?.includes('dk:blocked')
+            ? 'blocked'
+            : 'backlog',
     trackerReference: { provider: PROVIDER, id: refId },
     createdAt: now,
     updatedAt: now,
   };
   if (issue.body) Object.assign(base, { description: issue.body });
+  if (issue.labels && issue.labels.length > 0) Object.assign(base, { labels: [...issue.labels] });
   return base;
 }

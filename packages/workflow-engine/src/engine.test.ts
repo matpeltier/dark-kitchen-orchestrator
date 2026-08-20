@@ -4,6 +4,7 @@ import {
   WorkflowCancelledError,
   WorkflowAgentError,
   MissingRoleError,
+  WorkflowConfigurationError,
   InMemoryJournal,
   type RoleResolver,
   type HarnessRunner,
@@ -82,6 +83,24 @@ describe('agent()', () => {
     });
 
     expect(callCount.n).toBe(1); // only called once; second run replayed
+  });
+
+  it('replays a cached undefined result when the journal supports presence probes', async () => {
+    const journal = new InMemoryJournal();
+    let calls = 0;
+    const resolver = makeResolver({
+      impl: async () => {
+        calls++;
+        return undefined;
+      },
+    });
+    const workflow = async (b: import('./engine.js').WorkflowBuilder) =>
+      b.agent({ role: 'impl', prompt: 'undefined is still a result' });
+
+    await runWorkflow(workflow, { runId: 'undefined-cache', journal, resolver });
+    await runWorkflow(workflow, { runId: 'undefined-cache', journal, resolver });
+
+    expect(calls).toBe(1);
   });
 });
 
@@ -357,6 +376,33 @@ describe('cancellation', () => {
     await expect(promise).rejects.toBeInstanceOf(WorkflowCancelledError);
   });
 
+  it('never invokes a runner returned by a resolver that settles after cancellation', async () => {
+    const controller = new AbortController();
+    let runnerCalls = 0;
+    let resolveRunner!: (runner: HarnessRunner) => void;
+    const resolver: RoleResolver = () =>
+      new Promise<HarnessRunner>((resolve) => {
+        resolveRunner = resolve;
+      });
+    const promise = runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'x' }), {
+      runId: 'cancel-resolver',
+      journal: new InMemoryJournal(),
+      resolver,
+      signal: controller.signal,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort();
+    await expect(promise).rejects.toBeInstanceOf(WorkflowCancelledError);
+    resolveRunner(async () => {
+      runnerCalls++;
+      return 'late';
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(runnerCalls).toBe(0);
+  });
+
   it('does not execute child workflow after cancellation', async () => {
     const controller = new AbortController();
     const childLog: string[] = [];
@@ -424,6 +470,50 @@ describe('concurrency cap', () => {
     );
     expect(maxConcurrent).toBeLessThanOrEqual(3);
   });
+
+  it('shares the global cap across nested parallel groups', async () => {
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const resolver = makeResolver({
+      impl: async () => {
+        concurrent++;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        concurrent--;
+        return 'done';
+      },
+    });
+
+    await runWorkflow(
+      async (b) =>
+        b.parallel(
+          Array.from(
+            { length: 3 },
+            () => async (outer) =>
+              outer.parallel(
+                Array.from(
+                  { length: 3 },
+                  () => async (inner) => inner.agent({ role: 'impl', prompt: 'nested' }),
+                ),
+              ),
+          ),
+        ),
+      { runId: 'nested-cap', journal: new InMemoryJournal(), resolver, concurrency: 2 },
+    );
+
+    expect(maxConcurrent).toBeLessThanOrEqual(2);
+  });
+
+  it('rejects zero or non-integer concurrency instead of returning partial results', async () => {
+    await expect(
+      runWorkflow(async () => 'never', { ...defaultOptions(), concurrency: 0 }),
+    ).rejects.toBeInstanceOf(WorkflowConfigurationError);
+    await expect(
+      runWorkflow(async (b) => b.parallel([async () => 'never'], { concurrency: 1.5 }), {
+        ...defaultOptions(),
+      }),
+    ).rejects.toBeInstanceOf(WorkflowConfigurationError);
+  });
 });
 
 // ─── Stable call keys ─────────────────────────────────────────────────────────
@@ -447,5 +537,35 @@ describe('stable call keys', () => {
       { runId: 'keys', journal, resolver },
     );
     expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('repeated phases with the same name receive distinct stable scopes', async () => {
+    const journal = new InMemoryJournal();
+    const keys: string[] = [];
+    await runWorkflow(
+      async (b) => {
+        keys.push((await b.phase('review').agent({ role: 'impl', prompt: 'first' })).callKey);
+        keys.push((await b.phase('review').agent({ role: 'impl', prompt: 'second' })).callKey);
+      },
+      { runId: 'phase-keys', journal, resolver: defaultOptions().resolver },
+    );
+
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[0]).toBe('phase-keys/phase:review/agent:impl');
+    expect(keys[1]).toBe('phase-keys/phase:review[1]/agent:impl');
+  });
+
+  it('emits a complete progress protocol including terminal step errors', async () => {
+    const events: string[] = [];
+    await expect(
+      runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'x' }), {
+        runId: 'progress',
+        journal: new InMemoryJournal(),
+        resolver: makeResolver({ impl: failingRunner('failure') }),
+        onProgress: (event) => events.push(event.kind),
+      }),
+    ).rejects.toBeInstanceOf(WorkflowAgentError);
+
+    expect(events).toEqual(['workflow.start', 'step.start', 'step.error']);
   });
 });

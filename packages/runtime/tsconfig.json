@@ -11,6 +11,7 @@
   "references": [
     { "path": "../core" },
     { "path": "../harness" },
+    { "path": "../process-execution" },
     { "path": "../runtime-store-sqlite" },
     { "path": "../scm" },
     { "path": "../tracker" },

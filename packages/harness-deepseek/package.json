@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@dark-kitchen/core": "workspace:*",
-    "@dark-kitchen/harness": "workspace:*"
+    "@dark-kitchen/harness": "workspace:*",
+    "@dark-kitchen/process-execution": "workspace:*"
   }
 }

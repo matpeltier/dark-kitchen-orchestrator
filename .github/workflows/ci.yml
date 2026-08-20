@@ -48,5 +48,107 @@ jobs:
       - name: Validate package manifests
         run: pnpm validate:packages
 
+      - name: Validate documentation links and architecture asset
+        run: node packaging/check-docs.mjs
+
       - name: Run aggregate validation
         run: pnpm validate
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install and build
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm --filter dark-kitchen build
+
+      - name: Pack and install in a clean npm project
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-pack" "$RUNNER_TEMP/npm-smoke"
+          npm pack ./apps/cli --pack-destination "$RUNNER_TEMP/npm-pack"
+          package_tarball="$(find "$RUNNER_TEMP/npm-pack" -maxdepth 1 -name '*.tgz' -print -quit)"
+          test -n "$package_tarball"
+          cd "$RUNNER_TEMP/npm-smoke"
+          npm init --yes
+          npm install "$package_tarball"
+          npm audit --omit=dev --audit-level=high
+          test -s node_modules/dark-kitchen/README.md
+          test -s node_modules/dark-kitchen/LICENSE
+          test -s node_modules/dark-kitchen/NOTICE
+          test ! -d node_modules/discord.js
+          test ! -d node_modules/@slack/bolt
+          test ! -d node_modules/whatsapp-web.js
+          git init
+          printf 'preserve me\n' > unrelated.txt
+          npx --no-install dark-kitchen --help
+          test "$(npx --no-install dark-kitchen --version)" = "$(node -p "require('$RUNNER_TEMP/npm-smoke/node_modules/dark-kitchen/package.json').version")"
+          npx --no-install dark-kitchen init
+          test -f .dark-kitchen/config.yaml
+          grep -q 'id: fixer' .dark-kitchen/config.yaml
+          grep -q 'id: repository-tester' .dark-kitchen/config.yaml
+          test "$(cat unrelated.txt)" = 'preserve me'
+          first_hash="$(sha256sum .dark-kitchen/config.yaml | cut -d' ' -f1)"
+          npx --no-install dark-kitchen init
+          second_hash="$(sha256sum .dark-kitchen/config.yaml | cut -d' ' -f1)"
+          test "$first_hash" = "$second_hash"
+          npx --no-install dark-kitchen doctor
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build container
+        run: docker build --tag dark-kitchen:ci .
+
+      - name: Start and stop daemon with persistent state
+        run: |
+          project_dir="$RUNNER_TEMP/container-project"
+          runtime_dir="$RUNNER_TEMP/container-runtime"
+          tool_dir="$RUNNER_TEMP/container-tools"
+          mkdir -p "$project_dir" "$runtime_dir" "$tool_dir"
+          chmod 0777 "$project_dir" "$runtime_dir" "$tool_dir"
+          git -C "$project_dir" init
+          docker run --detach --name dark-kitchen-ci \
+            --env DK_NO_DASHBOARD=1 \
+            --volume "$project_dir:/workspace" \
+            --volume "$runtime_dir:/workspace/.dark-kitchen/runtime" \
+            --volume "$tool_dir:/home/node/.dark-kitchen" \
+            dark-kitchen:ci start --foreground
+          for attempt in $(seq 1 20); do
+            if docker logs dark-kitchen-ci 2>&1 | grep -q 'Daemon started'; then
+              break
+            fi
+            if test "$(docker inspect --format '{{.State.Running}}' dark-kitchen-ci)" != true; then
+              docker logs dark-kitchen-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          docker logs dark-kitchen-ci 2>&1 | grep -q 'Daemon started'
+          test -f "$runtime_dir/store.db"
+          docker stop --time 30 dark-kitchen-ci
+
+      - name: Print container logs on failure
+        if: failure()
+        run: docker logs dark-kitchen-ci 2>&1 || true
+
+      - name: Remove smoke container
+        if: always()
+        run: docker rm --force dark-kitchen-ci 2>/dev/null || true

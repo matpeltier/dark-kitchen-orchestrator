@@ -43,9 +43,16 @@ export interface MergePullRequestInput {
   readonly expectedHeadSha?: string;
 }
 
+export interface DeleteBranchInput {
+  readonly repositoryId: RepositoryId;
+  readonly branchName: string;
+}
+
 export type CheckPollPolicy = {
   readonly intervalMs: number;
   readonly timeoutMs: number;
+  /** When present, polling continues until every named check is terminal. */
+  readonly requiredChecks?: readonly string[];
 };
 
 export interface FullScmAdapter {
@@ -63,6 +70,7 @@ export interface FullScmAdapter {
   pollChecks(pullRequestId: PullRequestId, policy: CheckPollPolicy): Promise<readonly Check[]>;
   merge(input: MergePullRequestInput): Promise<PullRequest>;
   verifyMerged(pullRequestId: PullRequestId): Promise<boolean>;
+  deleteBranch(input: DeleteBranchInput): Promise<void>;
 }
 
 export class ScmError extends Error {

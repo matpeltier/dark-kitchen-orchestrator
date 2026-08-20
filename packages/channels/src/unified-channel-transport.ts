@@ -13,8 +13,8 @@
  * Supported channels (require macOS):
  *   - iMessage    → no token, reads macOS Messages DB
  *
- * Supported channels (require public webhook URL):
- *   - WhatsApp    → WHATSAPP_WEBHOOK_URL
+ * Supported channels (require QR-code pairing, no token):
+ *   - WhatsApp    → whatsapp-web.js (headless Chrome + WhatsApp Web QR scan)
  *
  * Usage (in config.yaml):
  *   channels:
@@ -22,9 +22,8 @@
  *       tokenEnv: TELEGRAM_BOT_TOKEN
  *       defaultTarget: "123456789"   # your Telegram user/chat ID
  *
- * The transport starts a single ChannelManager shared across all configured
- * channels. Inbound messages from any channel are routed to the intervention
- * correlation logic in ChannelGateway.
+ * Adapters connect independently so one provider outage cannot take down the
+ * others. Inbound messages are routed to ChannelGateway correlation logic.
  */
 
 import { createChannelMessageId } from '@dark-kitchen/core';
@@ -32,17 +31,16 @@ import type { ChannelTransport, InboundMessage, OutboundMessage } from './gatewa
 
 // ─── unified-channel types (lazy import) ─────────────────────────────────────
 
-type UcChannelManager = {
-  addChannel(adapter: unknown): void;
+type UcChannelAdapter = {
+  readonly channelId: string;
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
   onMessage(handler: (msg: UcUnifiedMessage) => void | Promise<void>): void;
-  run(): Promise<void>;
-  shutdown(): Promise<void>;
-  send(
-    channel: string,
-    chatId: string,
-    text: string,
-    opts?: { buttons?: UcButton[][] },
-  ): Promise<void>;
+  send(message: {
+    chatId: string;
+    text: string;
+    buttons?: UcButton[][];
+  }): Promise<string | undefined>;
 };
 
 type UcUnifiedMessage = {
@@ -52,6 +50,7 @@ type UcUnifiedMessage = {
   content: { type: string; text: string; callbackData?: string };
   timestamp: Date;
   chatId?: string;
+  replyToId?: string;
 };
 
 type UcButton = { label: string; callbackData?: string; url?: string };
@@ -66,6 +65,14 @@ export interface UnifiedChannelConfig {
   readonly token2Env?: string;
   /** Default chat/user ID to send notifications to. */
   readonly defaultTarget?: string;
+  /** Optional sender IDs allowed to resolve interventions. */
+  readonly allowedSenderIds?: readonly string[];
+  /** Telegram receive mode. Polling is the secure local default. */
+  readonly telegramMode?: 'polling' | 'webhook';
+  readonly telegramWebhookUrl?: string;
+  readonly telegramWebhookPort?: number;
+  readonly telegramWebhookPath?: string;
+  readonly telegramWebhookSecret?: string;
 }
 
 export interface UnifiedChannelTransportOptions {
@@ -81,12 +88,18 @@ export class UnifiedChannelTransport implements ChannelTransport {
   public readonly id: string;
 
   private readonly options: UnifiedChannelTransportOptions;
-  private manager?: UcChannelManager;
+  private readonly adapters = new Map<string, UcChannelAdapter>();
   private readonly inboundHandlers: Array<(msg: InboundMessage) => void | Promise<void>> = [];
   private msgCounter = 0;
   private started = false;
+  private starting: Promise<void> | undefined;
+  private adapterConstructors: Record<string, new (...args: unknown[]) => unknown> | undefined;
 
   public constructor(options: UnifiedChannelTransportOptions) {
+    const kinds = options.channels.map((channel) => channel.kind);
+    if (new Set(kinds).size !== kinds.length) {
+      throw new Error('Only one configuration per channel kind is supported per transport');
+    }
     this.id = options.id;
     this.options = options;
   }
@@ -97,57 +110,44 @@ export class UnifiedChannelTransport implements ChannelTransport {
    */
   public async start(): Promise<void> {
     if (this.started) return;
-    this.started = true;
+    if (this.starting) return this.starting;
+    const starting = this.startOnce().finally(() => {
+      this.starting = undefined;
+    });
+    this.starting = starting;
+    await starting;
+  }
 
-    // Dynamic import to avoid Vite/build-time resolution issues
+  private async startOnce(): Promise<void> {
+    // Dynamic import to avoid requiring SDKs for unconfigured channels.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ucModule = (await import('unified-channel')) as any;
-    const { ChannelManager } = ucModule as { ChannelManager: new () => UcChannelManager };
-    const adapters = ucModule as Record<string, new (...args: unknown[]) => unknown>;
+    const adapterConstructors = ucModule as Record<string, new (...args: unknown[]) => unknown>;
+    this.adapterConstructors = adapterConstructors;
 
-    const manager = new ChannelManager() as UcChannelManager;
-
-    for (const cfg of this.options.channels) {
-      const adapter = await this.buildAdapter(adapters, cfg);
-      if (adapter) manager.addChannel(adapter);
+    // Connect independently and concurrently: a QR-pairing or network stall on
+    // one provider must not delay Telegram or another healthy provider.
+    const connected = (
+      await Promise.all(
+        this.options.channels.map((cfg) => this.connectConfiguredChannel(cfg, adapterConstructors)),
+      )
+    ).filter(Boolean).length;
+    this.started = true;
+    if (connected === 0) {
+      this.started = false;
+      throw new Error('No configured messaging channel could connect');
     }
-
-    manager.onMessage(async (msg: UcUnifiedMessage) => {
-      const inbound: InboundMessage = {
-        id: createChannelMessageId(`uc-in-${++this.msgCounter}`),
-        address: {
-          channel: msg.channel,
-          conversationId: msg.chatId ?? msg.sender.id,
-        },
-        body: msg.content.text,
-        receivedAt: msg.timestamp.toISOString(),
-        ...(msg.content.callbackData ? { actionValue: msg.content.callbackData } : {}),
-        ...(msg.sender.id ? { senderId: msg.sender.id } : {}),
-      };
-      for (const handler of this.inboundHandlers) await handler(inbound);
-    });
-
-    this.manager = manager;
-
-    // Start in background — don't block daemon startup
-    manager.run().catch((err: unknown) => {
-      process.stderr.write(`[channels] unified-channel error: ${String(err)}\n`);
-    });
   }
 
   public async send(message: OutboundMessage): Promise<ReturnType<typeof createChannelMessageId>> {
-    if (!this.manager) {
+    if (!this.started) {
       await this.start();
     }
 
     const channelName = message.address.channel;
     const chatId = message.address.conversationId || this.getDefaultTarget(channelName);
     if (!chatId) {
-      // No target configured — log to console and return local ID
-      process.stderr.write(
-        `[channels] No target for channel ${channelName}. Message: ${message.body}\n`,
-      );
-      return createChannelMessageId(`uc-local-${++this.msgCounter}`);
+      throw new Error(`No target configured for channel ${channelName}`);
     }
 
     // Build buttons from actions
@@ -156,19 +156,34 @@ export class UnifiedChannelTransport implements ChannelTransport {
         ? [message.actions.map((a) => ({ label: a.label, callbackData: a.value }))]
         : undefined;
 
-    try {
-      await this.manager!.send(
-        channelName,
-        chatId,
-        message.body,
-        buttons ? { buttons } : undefined,
-      );
-    } catch {
-      // Channel error — non-fatal, intervention stays pending
-      process.stderr.write(`[channels] Failed to send to ${channelName}:${chatId}\n`);
+    let adapter = this.adapters.get(channelName);
+    if (!adapter && this.adapterConstructors) {
+      const config = this.options.channels.find((channel) => channel.kind === channelName);
+      if (config) await this.connectConfiguredChannel(config, this.adapterConstructors);
+      adapter = this.adapters.get(channelName);
     }
+    if (!adapter) throw new Error(`Channel ${channelName} is not connected`);
 
-    return createChannelMessageId(`uc-${channelName}-${++this.msgCounter}`);
+    const body = fitChannelMessage(channelName, message.body);
+    try {
+      const sentMessageId = await adapter.send({
+        chatId,
+        text: body,
+        ...(buttons ? { buttons } : {}),
+      });
+      // The real channel message id (e.g. Telegram's message_id) is what the
+      // human quotes back in reply_to — use it for correlation, not a local
+      // synthetic id.
+      return createChannelMessageId(
+        typeof sentMessageId === 'string' && sentMessageId
+          ? sentMessageId
+          : `uc-${channelName}-${++this.msgCounter}`,
+      );
+    } catch (error) {
+      // Propagate delivery failure to ChannelGateway. It performs bounded retry
+      // and reports a failed delivery without creating a false correlation.
+      throw new Error(`Failed to send to ${channelName}:${chatId}: ${safeTransportError(error)}`);
+    }
   }
 
   public subscribe(handler: (msg: InboundMessage) => void | Promise<void>): () => void {
@@ -180,19 +195,47 @@ export class UnifiedChannelTransport implements ChannelTransport {
   }
 
   public async destroy(): Promise<void> {
-    await this.manager?.shutdown();
+    const adapters = [...this.adapters.values()];
+    this.adapters.clear();
+    this.started = false;
+    this.adapterConstructors = undefined;
+    await Promise.allSettled(adapters.map((adapter) => adapter.disconnect()));
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
 
+  private async connectConfiguredChannel(
+    cfg: UnifiedChannelConfig,
+    adapters: Record<string, new (...args: unknown[]) => unknown>,
+  ): Promise<boolean> {
+    if (this.adapters.has(cfg.kind)) return true;
+    try {
+      const adapter = await this.buildAdapter(adapters, cfg);
+      if (!adapter) return false;
+      adapter.onMessage(async (msg: UcUnifiedMessage) => {
+        await this.handleUnifiedMessage(cfg, msg);
+      });
+      await adapter.connect();
+      this.adapters.set(cfg.kind, adapter);
+      return true;
+    } catch (error) {
+      process.stderr.write(
+        `[channels] ${cfg.kind}: connection failed: ${safeTransportError(error)}\n`,
+      );
+      return false;
+    }
+  }
+
   private async buildAdapter(
     adapters: Record<string, new (...args: unknown[]) => unknown>,
     cfg: UnifiedChannelConfig,
-  ): Promise<unknown | null> {
+  ): Promise<UcChannelAdapter | null> {
     const token = cfg.tokenEnv ? (process.env[cfg.tokenEnv] ?? '') : '';
     const token2 = cfg.token2Env ? (process.env[cfg.token2Env] ?? '') : '';
 
-    if (!token && cfg.kind !== 'imessage') {
+    // iMessage and WhatsApp authenticate without a token (local Messages DB /
+    // WhatsApp Web QR-code pairing respectively).
+    if (!token && cfg.kind !== 'imessage' && cfg.kind !== 'whatsapp') {
       process.stderr.write(
         `[channels] ${cfg.kind}: no token (${cfg.tokenEnv}) — channel skipped\n`,
       );
@@ -201,16 +244,24 @@ export class UnifiedChannelTransport implements ChannelTransport {
 
     switch (cfg.kind) {
       case 'telegram': {
-        const { TelegramAdapter } = adapters as unknown as {
-          TelegramAdapter: new (token: string) => unknown;
-        };
-        return new TelegramAdapter(token);
+        const { TelegramChannelAdapter } = await import('./telegram-adapter.js');
+        return new TelegramChannelAdapter(token, {
+          mode: cfg.telegramMode ?? 'polling',
+          ...(cfg.defaultTarget ? { allowedChatIds: [cfg.defaultTarget] } : {}),
+          ...(cfg.allowedSenderIds ? { allowedSenderIds: cfg.allowedSenderIds } : {}),
+          ...(cfg.telegramWebhookUrl ? { webhookUrl: cfg.telegramWebhookUrl } : {}),
+          ...(cfg.telegramWebhookPort !== undefined
+            ? { webhookPort: cfg.telegramWebhookPort }
+            : {}),
+          ...(cfg.telegramWebhookPath ? { webhookPath: cfg.telegramWebhookPath } : {}),
+          ...(cfg.telegramWebhookSecret ? { webhookSecret: cfg.telegramWebhookSecret } : {}),
+        });
       }
       case 'discord': {
         const { DiscordAdapter } = adapters as unknown as {
           DiscordAdapter: new (token: string) => unknown;
         };
-        return new DiscordAdapter(token);
+        return new DiscordAdapter(token) as UcChannelAdapter;
       }
       case 'slack': {
         const { SlackAdapter } = adapters as unknown as {
@@ -222,17 +273,19 @@ export class UnifiedChannelTransport implements ChannelTransport {
           );
           return null;
         }
-        return new SlackAdapter(token, token2);
+        return new SlackAdapter(token, token2) as UcChannelAdapter;
       }
       case 'imessage': {
         const { IMessageAdapter } = adapters as unknown as { IMessageAdapter: new () => unknown };
-        return new IMessageAdapter();
+        return new IMessageAdapter() as UcChannelAdapter;
       }
       case 'whatsapp': {
-        const { WhatsAppAdapter } = adapters as unknown as {
-          WhatsAppAdapter: new (webhookUrl: string) => unknown;
-        };
-        return new WhatsAppAdapter(token);
+        // Own adapter: unified-channel's version breaks on the CJS/ESM
+        // interop of whatsapp-web.js (`LocalAuth is not a constructor`).
+        const { WhatsAppAdapter } = await import('./whatsapp-adapter.js');
+        return new WhatsAppAdapter(
+          cfg.defaultTarget ? { selfChatId: cfg.defaultTarget } : {},
+        ) as UcChannelAdapter;
       }
       default:
         process.stderr.write(`[channels] Unknown channel kind: ${String(cfg.kind)}\n`);
@@ -243,4 +296,46 @@ export class UnifiedChannelTransport implements ChannelTransport {
   private getDefaultTarget(channelKind: string): string {
     return this.options.channels.find((c) => c.kind === channelKind)?.defaultTarget ?? '';
   }
+
+  private async handleUnifiedMessage(
+    cfg: UnifiedChannelConfig,
+    msg: UcUnifiedMessage,
+  ): Promise<void> {
+    const conversationId = msg.chatId ?? msg.sender.id;
+    // The configured outbound target doubles as a secure inbound conversation
+    // allowlist. Optional sender IDs further restrict shared/group chats.
+    if (msg.channel !== cfg.kind) return;
+    if (cfg.defaultTarget && conversationId !== cfg.defaultTarget) return;
+    if (cfg.allowedSenderIds && !cfg.allowedSenderIds.includes(msg.sender.id)) return;
+
+    const timestamp = msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp);
+    if (!Number.isFinite(timestamp.getTime())) return;
+    const inbound: InboundMessage = {
+      // Provider IDs are stable across polling/webhook redelivery and therefore
+      // usable for replay protection. Do not replace them with local counters.
+      id: createChannelMessageId(msg.id || `uc-in-${++this.msgCounter}`),
+      address: { channel: msg.channel, conversationId },
+      body: msg.content.text ?? '',
+      receivedAt: timestamp.toISOString(),
+      ...(msg.content.callbackData ? { actionValue: msg.content.callbackData } : {}),
+      ...(msg.sender.id ? { senderId: msg.sender.id } : {}),
+      ...(msg.replyToId ? { replyToMessageId: msg.replyToId } : {}),
+    };
+    for (const handler of this.inboundHandlers) await handler(inbound);
+  }
+}
+
+export function fitChannelMessage(channel: string, body: string): string {
+  const limit = channel === 'discord' ? 2_000 : channel === 'telegram' ? 4_096 : 16_000;
+  if (body.length <= limit) return body;
+  const marker = '\n\n… [message truncated by Dark Kitchen] …\n\n';
+  const remaining = limit - marker.length;
+  const headLength = Math.ceil(remaining * 0.6);
+  return body.slice(0, headLength) + marker + body.slice(-(remaining - headLength));
+}
+
+function safeTransportError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error ?? 'unknown error'))
+    .replace(/((?:bearer|token|api[_-]?key|secret|password)\s*[:=]\s*)\S+/gi, '$1[REDACTED]')
+    .slice(0, 500);
 }

@@ -49,6 +49,8 @@ export interface Task {
   readonly projectId: ProjectId;
   readonly title: string;
   readonly description?: string;
+  /** Provider-normalized labels/tags used by scheduling and workflow selection. */
+  readonly labels?: readonly string[];
   readonly status: TaskStatus;
   readonly trackerReference?: TrackerReference;
   readonly createdAt: string;
@@ -212,6 +214,8 @@ export interface PullRequest {
   readonly status: PullRequestStatus;
   readonly sourceBranch: string;
   readonly targetBranch: string;
+  /** Current source commit used for compare-and-merge protection when available. */
+  readonly headSha?: string;
   readonly reference: ScmReference;
   readonly url?: string;
 }

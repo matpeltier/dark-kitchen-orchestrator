@@ -16,6 +16,12 @@ export interface AgentCallInput {
   readonly role: AgentRole;
   readonly prompt: string;
   readonly context?: Record<string, unknown>;
+  /** Filesystem path where the agent should run (the task's worktree). */
+  readonly workspacePath?: string;
+  /** Run identifier for the task (used to key persistent agent sessions). */
+  readonly runId?: string;
+  /** Task identifier (used to key persistent agent sessions per task). */
+  readonly taskId?: string;
 }
 
 export interface AgentCallOutput {
@@ -27,8 +33,14 @@ export interface AgentCallOutput {
 /** A harness runner receives an agent call and returns a result. */
 export type HarnessRunner = (input: AgentCallInput, signal: AbortSignal) => Promise<unknown>;
 
-/** Resolves a role name to a HarnessRunner. */
-export type RoleResolver = (role: AgentRole) => HarnessRunner;
+/**
+ * Resolves a semantic role to a harness runner.
+ *
+ * Resolution may be asynchronous because native/custom harness plugins can be
+ * loaded lazily. The engine still treats the resolved runner as opaque: no
+ * harness or model identifier enters the workflow API.
+ */
+export type RoleResolver = (role: AgentRole) => HarnessRunner | PromiseLike<HarnessRunner>;
 
 export interface WorkflowContext {
   readonly runId: string;
@@ -59,6 +71,11 @@ export interface ProgressEvent {
 export interface JournalStore {
   get(callKey: string): Promise<WorkflowStepResult | undefined>;
   set(callKey: string, result: WorkflowStepResult): Promise<void>;
+  /**
+   * Optional presence probe used to distinguish a cached `undefined` result
+   * from an absent entry. Existing durable journals can omit it.
+   */
+  has?(callKey: string): boolean | Promise<boolean>;
 }
 
 export interface RetryPolicy {

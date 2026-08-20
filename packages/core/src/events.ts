@@ -78,6 +78,29 @@ export type AgentSessionCompletedEvent = TypedDomainEvent<
   }
 >;
 
+/** Immutable audit record for a manual agent/run control operation. */
+export type AgentControlEvent = TypedDomainEvent<
+  'agent.control',
+  {
+    readonly requestId: string;
+    readonly action:
+      | 'send-instruction'
+      | 'interrupt-and-send'
+      | 'stop'
+      | 'restart'
+      | 'retry'
+      | 'switch-profile'
+      | 'pause-run'
+      | 'resume-run'
+      | 'retry-run';
+    readonly sessionId?: AgentSessionId;
+    readonly resultingSessionId?: AgentSessionId;
+    readonly runId: RunId;
+    readonly runtimeId?: string;
+    readonly profileId?: string;
+  }
+>;
+
 export type InterventionCreatedEvent = TypedDomainEvent<
   'intervention.created',
   { readonly intervention: Intervention }
@@ -129,6 +152,7 @@ export type DomainEvent =
   | AgentSessionStartedEvent
   | AgentSessionStateChangedEvent
   | AgentSessionCompletedEvent
+  | AgentControlEvent
   | InterventionCreatedEvent
   | InterventionStateChangedEvent
   | PullRequestStateChangedEvent

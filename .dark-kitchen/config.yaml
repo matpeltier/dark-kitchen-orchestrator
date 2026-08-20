@@ -1,4 +1,44 @@
-# Dark Kitchen configuration schema placeholder.
-# This file documents the versioned configuration shape only; it has no runtime behavior yet.
 version: 1
-schema: {}
+trackers:
+  - id: gh-issues
+    kind: github-issues
+    owner: matpeltier
+    repo: dark-kitchen-orchestrator
+    tokenEnv: GITHUB_TOKEN
+repositories:
+  - id: main-repo
+    kind: github
+    owner: matpeltier
+    repo: dark-kitchen-orchestrator
+    defaultBranch: main
+    tokenEnv: GITHUB_TOKEN
+harnessProfiles:
+  - managed: true
+    id: codex
+    kind: codex
+roles:
+  - id: implementer
+    harnessProfileId: codex
+  - id: reviewer
+    harnessProfileId: codex
+  - id: fixer
+    harnessProfileId: codex
+  - id: repository-tester
+    harnessProfileId: codex
+workflows:
+  - id: default
+    builtin: default
+    roles:
+      - implementer
+      - reviewer
+      - fixer
+      - repository-tester
+mergePolicy:
+  strategy: squash
+  requiredChecks:
+    - validate (ubuntu-latest)
+    - validate (macos-latest)
+    - package-smoke
+    - container-smoke
+  requireApproval: false
+  deleteHeadBranchAfterMerge: true

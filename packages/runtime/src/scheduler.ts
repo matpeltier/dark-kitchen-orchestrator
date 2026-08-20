@@ -31,7 +31,7 @@ export class CyclicGraphError extends Error {
 /**
  * Determines which tasks are ready to execute given the current task graph and
  * running/completed states. A task is ready when:
- * - It has status 'backlog' or 'ready'
+ * - It has status 'ready'
  * - All tasks it depends on (via 'blocks' edges) are 'completed'
  * - It is not currently active or blocked
  */
@@ -68,7 +68,7 @@ export function computeReadyTasks(
   }
 
   return tasks.filter((task) => {
-    if (task.status !== 'backlog' && task.status !== 'ready') return false;
+    if (task.status !== 'ready') return false;
     if (activeTasks.has(task.id)) return false;
     const blockers = blockedBy.get(task.id) ?? new Set();
     return [...blockers].every((blockerId) => completedTaskIds.has(blockerId));
@@ -107,6 +107,7 @@ export class RunSupervisor {
     const available = this.config.maxParallelTasks - this.activeRuns.size;
     const toSchedule = readyTasks
       .filter((t) => !this.manuallyPaused.has(t.id))
+      .filter((t) => !this.completedTasks.has(t.id))
       .slice(0, Math.max(0, available));
 
     const launched: TaskId[] = [];
@@ -140,8 +141,38 @@ export class RunSupervisor {
     this.manuallyPaused.delete(taskId);
   }
 
+  /**
+   * Stop a task: pause it AND drop it from the active/completed sets so a later
+   * explicit restart is required (pause + retry semantics). The tracker status
+   * itself is NOT touched — callers should set the task blocked there too.
+   */
+  public stopTask(taskId: TaskId): void {
+    this.activeRuns.delete(taskId);
+    this.completedTasks.delete(taskId);
+    this.manuallyPaused.add(taskId);
+  }
+
+  /** Retry a completed/failed/paused task: clears all bookkeeping, scheduler will re-run it. */
+  public retryTask(taskId: TaskId): void {
+    this.activeRuns.delete(taskId);
+    this.completedTasks.delete(taskId);
+    this.manuallyPaused.delete(taskId);
+  }
+
   public getActiveRuns(): ReadonlyMap<TaskId, RunId> {
     return this.activeRuns;
+  }
+
+  public getPausedTasks(): ReadonlySet<TaskId> {
+    return this.manuallyPaused;
+  }
+
+  public getCompletedTasks(): ReadonlySet<TaskId> {
+    return this.completedTasks;
+  }
+
+  public getMaxParallelTasks(): number {
+    return this.config.maxParallelTasks;
   }
 
   public isActive(taskId: TaskId): boolean {

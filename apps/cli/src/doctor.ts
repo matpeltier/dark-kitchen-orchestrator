@@ -11,6 +11,8 @@ import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const execAsync = promisify(exec);
+const ACPX_MIN_VERSION = [0, 13, 1] as const;
+const ACPX_MAX_EXCLUSIVE = [0, 14, 0] as const;
 
 export interface DoctorCheck {
   readonly name: string;
@@ -101,7 +103,18 @@ export async function runDoctor(projectRoot: string): Promise<DoctorReport> {
   // acpx
   try {
     const { stdout } = await execAsync('acpx --version');
-    checks.push({ name: 'acpx', status: 'ok', message: `acpx ${stdout.trim()}` });
+    const version = parseVersion(stdout);
+    const compatible =
+      version !== undefined &&
+      compareVersion(version, ACPX_MIN_VERSION) >= 0 &&
+      compareVersion(version, ACPX_MAX_EXCLUSIVE) < 0;
+    checks.push({
+      name: 'acpx',
+      status: compatible ? 'ok' : 'error',
+      message: compatible
+        ? `acpx ${stdout.trim()} (supported >=0.13.1 <0.14.0)`
+        : `Unsupported acpx ${stdout.trim() || 'unknown'} — install 0.13.1 (supported >=0.13.1 <0.14.0)`,
+    });
   } catch {
     checks.push({
       name: 'acpx',
@@ -150,6 +163,23 @@ export async function runDoctor(projectRoot: string): Promise<DoctorReport> {
 
   const healthy = checks.every((c) => c.status === 'ok' || c.status === 'warn');
   return { checks, healthy };
+}
+
+function parseVersion(value: string): readonly [number, number, number] | undefined {
+  const match = value.match(/\b(\d+)\.(\d+)\.(\d+)\b/u);
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersion(
+  left: readonly [number, number, number],
+  right: readonly [number, number, number],
+): number {
+  for (let index = 0; index < 3; index += 1) {
+    const difference = left[index]! - right[index]!;
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 export function formatDoctorReport(report: DoctorReport): string {

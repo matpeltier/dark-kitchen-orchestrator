@@ -19,6 +19,7 @@ import type {
   CommentInput,
   CreateTaskInput,
   FullTrackerAdapter,
+  TrackerComment,
   TrackerTaskUpdate,
 } from './contracts.js';
 import { CyclicDependencyError, TrackerError, wouldCreateCycle } from './contracts.js';
@@ -137,9 +138,40 @@ export class JiraTrackerAdapter implements FullTrackerAdapter {
     return this.updateTask(taskId, { status: 'backlog' });
   }
 
+  public async setBlocked(taskId: TaskId): Promise<void> {
+    await this.updateTask(taskId, { status: 'blocked' });
+  }
+
   public async addComment(input: CommentInput): Promise<void> {
     const key = requireJiraKey(input.taskId);
     await this.jiraPost(`/rest/api/3/issue/${key}/comment`, { body: input.body });
+  }
+
+  public async listComments(taskId: TaskId): Promise<readonly TrackerComment[]> {
+    const key = requireJiraKey(taskId);
+    const data = await this.jiraGet<{
+      comments?: Array<{
+        id: string;
+        body: unknown;
+        created: string;
+        author?: { displayName?: string; emailAddress?: string };
+        self?: string;
+      }>;
+    }>(`/rest/api/3/issue/${key}/comment`);
+    return (data.comments ?? []).map((comment) => ({
+      id: comment.id,
+      taskId,
+      body: jiraText(comment.body),
+      ...(comment.author?.displayName || comment.author?.emailAddress
+        ? { author: comment.author.displayName ?? comment.author.emailAddress }
+        : {}),
+      createdAt: comment.created,
+      ...(comment.self ? { url: comment.self } : {}),
+    }));
+  }
+
+  public async setAutonomousApproval(taskId: TaskId, approved: boolean): Promise<Task> {
+    return this.updateTask(taskId, { status: approved ? 'ready' : 'backlog' });
   }
 
   public async addDependency(input: AddDependencyInput): Promise<TaskDependency> {
@@ -205,6 +237,9 @@ export class JiraTrackerAdapter implements FullTrackerAdapter {
     };
     if (issue.fields?.description)
       Object.assign(base, { description: String(issue.fields.description) });
+    if (issue.fields?.labels && issue.fields.labels.length > 0) {
+      Object.assign(base, { labels: [...issue.fields.labels] });
+    }
     return base;
   }
 
@@ -285,6 +320,7 @@ interface JiraIssue {
     status?: { name: string };
     created?: string;
     updated?: string;
+    labels?: string[];
   };
 }
 
@@ -297,4 +333,15 @@ function requireJiraKey(taskId: TaskId): string {
   const key = extractJiraKey(taskId);
   if (!key) throw new TrackerError(`Cannot extract Jira key from task ID: ${taskId}`);
   return key;
+}
+
+function jiraText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(jiraText).filter(Boolean).join('\n');
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (typeof record['text'] === 'string') return record['text'];
+    return jiraText(record['content']);
+  }
+  return '';
 }

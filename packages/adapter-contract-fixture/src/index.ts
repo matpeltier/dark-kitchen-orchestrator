@@ -225,6 +225,10 @@ export class ContractRuntimeStore implements RuntimeStore {
     return undefined;
   }
 
+  public async listRuns(): Promise<Run[]> {
+    return [];
+  }
+
   public async getWorkflowRun(_workflowRunId: WorkflowRunId): Promise<WorkflowRun | undefined> {
     void _workflowRunId;
     return undefined;
@@ -233,6 +237,10 @@ export class ContractRuntimeStore implements RuntimeStore {
   public async saveWorkflowRun(_workflowRun: WorkflowRun): Promise<void> {
     void _workflowRun;
     return undefined;
+  }
+
+  public async listWorkflowRuns(): Promise<WorkflowRun[]> {
+    return [];
   }
 
   public async getAgentSession(_agentSessionId: AgentSessionId): Promise<AgentSession | undefined> {
@@ -245,6 +253,10 @@ export class ContractRuntimeStore implements RuntimeStore {
     return undefined;
   }
 
+  public async listAgentSessions(): Promise<AgentSession[]> {
+    return [];
+  }
+
   public async getWorkspace(_workspaceId: WorkspaceId): Promise<Workspace | undefined> {
     void _workspaceId;
     return undefined;
@@ -255,9 +267,17 @@ export class ContractRuntimeStore implements RuntimeStore {
     return undefined;
   }
 
+  public async listWorkspaces(): Promise<Workspace[]> {
+    return [];
+  }
+
   public async getIntervention(_interventionId: InterventionId): Promise<Intervention | undefined> {
     void _interventionId;
     return undefined;
+  }
+
+  public async listInterventions(): Promise<Intervention[]> {
+    return [];
   }
 
   public async saveIntervention(_intervention: Intervention): Promise<void> {
@@ -285,6 +305,23 @@ export class ContractRuntimeStore implements RuntimeStore {
   public async getEvent(_eventId: EventId): Promise<DomainEvent | undefined> {
     void _eventId;
     return undefined;
+  }
+
+  public async listEvents(_options?: {
+    type?: string;
+    limit?: number;
+    afterSeq?: number;
+  }): Promise<DomainEvent[]> {
+    void _options;
+    return [];
+  }
+
+  public getDiagnostics(): {
+    schemaVersion: number;
+    counts: Record<string, number>;
+    integrityCheck: string;
+  } {
+    return { schemaVersion: 0, counts: {}, integrityCheck: 'ok' };
   }
 }
 

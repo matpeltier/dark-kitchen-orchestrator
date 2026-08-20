@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
-import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
+import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import type { DarkKitchenConfig } from './schema.js';
 import { migrateConfig, type RawConfig } from './migrations.js';
 import { validateConfig, ConfigValidationError } from './validate.js';
@@ -63,7 +63,7 @@ export class ConfigStore {
       throw err;
     }
 
-    const parsed = yamlLoad(raw);
+    const parsed = yamlParse(raw);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new ConfigValidationError('Config file must be a YAML mapping (object).');
     }
@@ -105,7 +105,7 @@ export class ConfigStore {
   ): Promise<void> {
     await mkdir(dirname(this.configPath), { recursive: true });
     const tmpPath = `${this.configPath}.tmp`;
-    const yaml = yamlDump(config, { lineWidth: 120, quotingType: '"' });
+    const yaml = yamlStringify(config, { lineWidth: 120 });
     await writeFile(tmpPath, yaml, 'utf8');
     await rename(tmpPath, this.configPath);
 
@@ -184,12 +184,14 @@ export const SAMPLE_GITHUB_ISSUES_CONFIG: DarkKitchenConfig = {
   roles: [
     { id: 'implementer', harnessProfileId: 'cursor-composer' },
     { id: 'reviewer', harnessProfileId: 'cursor-composer' },
+    { id: 'fixer', harnessProfileId: 'cursor-composer' },
+    { id: 'repository-tester', harnessProfileId: 'cursor-composer' },
   ],
   workflows: [
     {
       id: 'default',
-      file: '.dark-kitchen/workflows/default.ts',
-      roles: ['implementer', 'reviewer'],
+      builtin: 'default',
+      roles: ['implementer', 'reviewer', 'fixer', 'repository-tester'],
     },
   ],
   mergePolicy: {
@@ -227,12 +229,17 @@ export const SAMPLE_LINEAR_GITHUB_CONFIG: DarkKitchenConfig = {
       kind: 'cursor-composer',
     },
   ],
-  roles: [{ id: 'implementer', harnessProfileId: 'cursor-composer' }],
+  roles: [
+    { id: 'implementer', harnessProfileId: 'cursor-composer' },
+    { id: 'reviewer', harnessProfileId: 'cursor-composer' },
+    { id: 'fixer', harnessProfileId: 'cursor-composer' },
+    { id: 'repository-tester', harnessProfileId: 'cursor-composer' },
+  ],
   workflows: [
     {
       id: 'default',
-      file: '.dark-kitchen/workflows/default.ts',
-      roles: ['implementer'],
+      builtin: 'default',
+      roles: ['implementer', 'reviewer', 'fixer', 'repository-tester'],
     },
   ],
   mergePolicy: {
@@ -244,6 +251,10 @@ export const SAMPLE_LINEAR_GITHUB_CONFIG: DarkKitchenConfig = {
 
 export const SAMPLE_LINEAR_GITHUB_WITH_WEB_E2E_CONFIG: DarkKitchenConfig = {
   ...SAMPLE_LINEAR_GITHUB_CONFIG,
+  roles: [
+    ...(SAMPLE_LINEAR_GITHUB_CONFIG.roles ?? []),
+    { id: 'verifier', harnessProfileId: 'cursor-composer' },
+  ],
   capabilityProviders: [
     {
       managed: true,
@@ -255,8 +266,7 @@ export const SAMPLE_LINEAR_GITHUB_WITH_WEB_E2E_CONFIG: DarkKitchenConfig = {
   verificationProfiles: [
     {
       id: 'web-e2e',
-      requiredCapabilities: ['playwright'],
-      skills: ['web-testing'],
+      requiredCapabilities: ['browser.playwright'],
       timeoutSeconds: 300,
       retryPolicy: { maxAttempts: 2, delaySeconds: 10 },
       evidencePolicy: { screenshots: true, logs: true },
@@ -266,8 +276,8 @@ export const SAMPLE_LINEAR_GITHUB_WITH_WEB_E2E_CONFIG: DarkKitchenConfig = {
   workflows: [
     {
       id: 'default',
-      file: '.dark-kitchen/workflows/default.ts',
-      roles: ['implementer'],
+      builtin: 'default',
+      roles: ['implementer', 'verifier'],
       verificationProfiles: ['web-e2e'],
     },
   ],

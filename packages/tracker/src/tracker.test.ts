@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { MockTrackerAdapter, CyclicDependencyError, wouldCreateCycle } from './index.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  MockTrackerAdapter,
+  GitHubIssuesAdapter,
+  CyclicDependencyError,
+  wouldCreateCycle,
+} from './index.js';
 import { createTaskId } from '@dark-kitchen/core';
 
 // ─── Shared adapter contract tests ───────────────────────────────────────────
@@ -10,6 +15,19 @@ describe('MockTrackerAdapter - shared contract', () => {
     const task = await adapter.createTask({ projectId: 'mock-project' as never, title: 'My task' });
     expect(task.title).toBe('My task');
     expect(task.status).toBe('backlog');
+  });
+
+  it('preserves normalized labels for workflow selection', async () => {
+    const adapter = new MockTrackerAdapter();
+    const task = await adapter.createTask({
+      projectId: 'mock-project' as never,
+      title: 'Labelled task',
+      labels: ['frontend', 'high-risk'],
+    });
+    expect(task.labels).toEqual(['frontend', 'high-risk']);
+    await expect(adapter.getTaskById(task.id)).resolves.toEqual(
+      expect.objectContaining({ labels: ['frontend', 'high-risk'] }),
+    );
   });
 
   it('round-trips task CRUD', async () => {
@@ -33,6 +51,26 @@ describe('MockTrackerAdapter - shared contract', () => {
     // Verify issue body is unchanged
     const fetched = await adapter.getTaskById(task.id);
     expect(fetched?.description).toBeUndefined();
+  });
+
+  it('returns normalized comments through the PM control contract', async () => {
+    const adapter = new MockTrackerAdapter();
+    const task = await adapter.createTask({ projectId: 'mock-project' as never, title: 'C2' });
+    await adapter.addComment({ taskId: task.id, body: 'Decision recorded' });
+    await expect(adapter.listComments(task.id)).resolves.toEqual([
+      expect.objectContaining({ taskId: task.id, body: 'Decision recorded', author: 'mock' }),
+    ]);
+  });
+
+  it('opts a task into and out of autonomous execution', async () => {
+    const adapter = new MockTrackerAdapter();
+    const task = await adapter.createTask({ projectId: 'mock-project' as never, title: 'Auto' });
+    await expect(adapter.setAutonomousApproval(task.id, true)).resolves.toEqual(
+      expect.objectContaining({ status: 'ready' }),
+    );
+    await expect(adapter.setAutonomousApproval(task.id, false)).resolves.toEqual(
+      expect.objectContaining({ status: 'backlog' }),
+    );
   });
 
   it('adds and removes a blocker dependency', async () => {
@@ -108,5 +146,82 @@ describe('wouldCreateCycle', () => {
       c = createTaskId('c');
     const deps = new Map([[b, new Set([a])]]);
     expect(wouldCreateCycle(deps, c, b)).toBe(false);
+  });
+});
+
+describe('GitHubIssuesAdapter native dependencies', () => {
+  it('round-trips native blocked-by edges across adapter instances without changing bodies', async () => {
+    const now = new Date().toISOString();
+    const issues = [
+      {
+        id: 101,
+        number: 1,
+        title: 'blocker',
+        body: 'keep me',
+        state: 'open',
+        labels: [],
+        created_at: now,
+        updated_at: now,
+      },
+      {
+        id: 102,
+        number: 2,
+        title: 'blocked',
+        body: 'keep me too',
+        state: 'open',
+        labels: [],
+        created_at: now,
+        updated_at: now,
+      },
+    ];
+    const blockedBy = new Map<number, Set<number>>();
+    const update = vi.fn();
+    const octokit = {
+      issues: {
+        listForRepo: vi.fn().mockResolvedValue({ data: issues }),
+        get: vi.fn(async ({ issue_number }: { issue_number: number }) => ({
+          data: issues.find((issue) => issue.number === issue_number),
+        })),
+        update,
+      },
+      request: vi.fn(async (route: string, input: Record<string, unknown>) => {
+        const issueNumber = Number(input['issue_number']);
+        if (route.startsWith('GET ')) {
+          const blockerIds = blockedBy.get(issueNumber) ?? new Set<number>();
+          return { data: issues.filter((issue) => blockerIds.has(issue.id)) };
+        }
+        if (route.startsWith('POST ')) {
+          const blockerId = Number(input['issue_id']);
+          const current = blockedBy.get(issueNumber) ?? new Set<number>();
+          current.add(blockerId);
+          blockedBy.set(issueNumber, current);
+          return { data: {} };
+        }
+        if (route.startsWith('DELETE ')) {
+          blockedBy.get(issueNumber)?.delete(Number(input['issue_id']));
+          return { data: {} };
+        }
+        throw new Error(`Unexpected route ${route}`);
+      }),
+    };
+    const config = { owner: 'o', repo: 'r', token: 'test' };
+    const task1 = createTaskId('github-issues:o/r#1');
+    const task2 = createTaskId('github-issues:o/r#2');
+    const adapter = new GitHubIssuesAdapter(config, octokit as never);
+
+    const dependency = await adapter.addDependency({
+      taskId: task2,
+      dependsOnTaskId: task1,
+      kind: 'blocks',
+    });
+    const restarted = new GitHubIssuesAdapter(config, octokit as never);
+    await expect(restarted.listDependencies(task2)).resolves.toEqual([dependency]);
+    await expect(
+      restarted.addDependency({ taskId: task1, dependsOnTaskId: task2, kind: 'blocks' }),
+    ).rejects.toBeInstanceOf(CyclicDependencyError);
+    await restarted.removeDependency(dependency.id);
+    await expect(restarted.listDependencies(task2)).resolves.toEqual([]);
+    expect(update).not.toHaveBeenCalled();
+    expect(issues.map((issue) => issue.body)).toEqual(['keep me', 'keep me too']);
   });
 });

@@ -211,6 +211,12 @@ export interface ProcessInvocation {
   readonly definition: ProcessDefinition;
   readonly payload?: PayloadTransport;
   readonly cwd?: string;
+  /**
+   * Additional process-local environment values. This is intended for
+   * credentials and bounded runtime configuration that must not appear in
+   * argv. Values are never included in diagnostics.
+   */
+  readonly environment?: Readonly<NodeJS.ProcessEnv>;
   readonly signal?: AbortSignal;
   readonly onDiagnostic?: (diagnostic: ProcessDiagnostic) => void;
 }
@@ -287,8 +293,11 @@ function payloadByteLength(payload: PayloadTransport | undefined): number | unde
   return undefined;
 }
 
-function createProcessEnvironment(payload: PayloadTransport | undefined): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
+function createProcessEnvironment(
+  payload: PayloadTransport | undefined,
+  overrides: Readonly<NodeJS.ProcessEnv> | undefined,
+): NodeJS.ProcessEnv {
+  const environment = { ...process.env, ...overrides };
   if (payload?.kind === 'file') {
     environment[PAYLOAD_FILE_ENVIRONMENT_VARIABLE] = payload.path;
   } else {
@@ -336,7 +345,7 @@ export function executeProcess(invocation: ProcessInvocation): Promise<ProcessRe
 
   const spawnOptions: Parameters<typeof spawn>[2] = {
     cwd: invocation.cwd,
-    env: createProcessEnvironment(payload),
+    env: createProcessEnvironment(payload, invocation.environment),
     shell: false,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
@@ -578,7 +587,7 @@ export function executeExceptionalShell(
   try {
     child = spawn(definition.command, {
       cwd: definition.cwd,
-      env: createProcessEnvironment(undefined),
+      env: createProcessEnvironment(undefined, undefined),
       shell: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,

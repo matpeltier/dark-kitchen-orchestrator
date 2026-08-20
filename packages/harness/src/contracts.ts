@@ -1,4 +1,10 @@
-import type { AgentSessionId, RunId, TaskId, WorkspaceId } from '@dark-kitchen/core';
+import type {
+  AgentSessionId,
+  AgentSessionState,
+  RunId,
+  TaskId,
+  WorkspaceId,
+} from '@dark-kitchen/core';
 import type { HarnessCapabilitySet } from './capabilities.js';
 
 /**
@@ -35,22 +41,27 @@ export type HarnessProfile = ManagedHarnessProfile | UserManagedHarnessProfile;
 export interface ResolvedRole {
   readonly roleId: string;
   readonly profile: HarnessProfile;
+  /** Runtime selected by profile kind; workflows never see this concrete binding. */
+  readonly runtime: HarnessRuntime;
   readonly modelOverride?: string;
   readonly reasoningOverride?: string;
   readonly instructionsOverride?: string;
+  readonly skillsOverride?: readonly string[];
+  readonly mcpServersOverride?: readonly string[];
+  readonly pluginsOverride?: readonly string[];
 }
 
 /**
  * Lifecycle event emitted by a harness session.
  */
-export type HarnessSessionState =
-  | 'starting'
-  | 'running'
-  | 'waiting'
-  | 'paused'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+export type HarnessSessionState = AgentSessionState | 'paused' | 'cancelled';
+
+/** Normalize adapter compatibility aliases at the core persistence boundary. */
+export function toAgentSessionState(state: HarnessSessionState): AgentSessionState {
+  if (state === 'cancelled') return 'stopped';
+  if (state === 'paused') return 'waiting';
+  return state;
+}
 
 export interface HarnessSessionEvent {
   readonly sessionId: string;
@@ -76,6 +87,12 @@ export interface StartSessionInput {
   readonly reasoning?: string;
   /** System-level instructions injected at session creation time. */
   readonly instructions?: string;
+  /** Trusted project-configured resources required for this session. */
+  readonly resources?: {
+    readonly skills?: readonly string[];
+    readonly mcpServers?: readonly string[];
+    readonly tools?: readonly string[];
+  };
 }
 
 /**
@@ -96,7 +113,10 @@ export interface HarnessSession {
  * All implementations must declare their capabilities.
  */
 export interface HarnessRuntime {
+  /** Runtime instance identifier (diagnostics/session ownership). */
   readonly id: string;
+  /** Adapter kind matched by `HarnessProfile.kind`. */
+  readonly kind: string;
   readonly capabilities: HarnessCapabilitySet;
 
   startSession(input: StartSessionInput): Promise<HarnessSession>;

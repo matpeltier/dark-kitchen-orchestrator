@@ -48,6 +48,13 @@ export class MissingRoleError extends Error {
   }
 }
 
+export class WorkflowConfigurationError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowConfigurationError';
+  }
+}
+
 // ─── Runner API ───────────────────────────────────────────────────────────────
 
 /** A workflow definition function receives a builder and returns a result. */
@@ -67,6 +74,9 @@ export interface RunWorkflowOptions {
  * Throws `WorkflowCancelledError` if the signal fires.
  */
 export async function runWorkflow<T>(fn: WorkflowFn<T>, options: RunWorkflowOptions): Promise<T> {
+  const concurrency = options.concurrency ?? 8;
+  assertPositiveInteger(concurrency, 'Workflow concurrency');
+
   const controller = new AbortController();
   const combinedSignal = options.signal
     ? combineSignals(options.signal, controller.signal)
@@ -81,22 +91,17 @@ export async function runWorkflow<T>(fn: WorkflowFn<T>, options: RunWorkflowOpti
   };
 
   const keyCtx = rootKeyContext(options.runId);
-  const builder = new WorkflowBuilder(ctx, keyCtx, options.concurrency ?? 8);
-
-  // Race the entire workflow fn against the signal so the run is cancelled
-  // promptly even when workflow code is awaiting opaque local promises.
-  const signalPromise = new Promise<never>((_, reject) => {
-    if (combinedSignal.aborted) {
-      reject(new WorkflowCancelledError());
-      return;
-    }
-    combinedSignal.addEventListener('abort', () => reject(new WorkflowCancelledError()), {
-      once: true,
-    });
-  });
+  const limiter = new AsyncSemaphore(concurrency);
+  const builder = new WorkflowBuilder(ctx, keyCtx, concurrency, limiter);
 
   try {
-    const result = await Promise.race([fn(builder), signalPromise]);
+    options.onProgress?.({ kind: 'workflow.start', callKey: options.runId });
+    // Race the complete workflow body, including code outside engine
+    // primitives, so cancellation is prompt even for opaque local awaits.
+    const result = await raceWithSignal(
+      Promise.resolve().then(() => fn(builder)),
+      combinedSignal,
+    );
     options.onProgress?.({ kind: 'workflow.complete', callKey: options.runId });
     return result;
   } catch (err) {
@@ -116,13 +121,20 @@ export class WorkflowBuilder {
   private readonly ctx: WorkflowContext;
   private readonly keyCtx: KeyContext;
   private readonly maxConcurrency: number;
+  private readonly limiter: AsyncSemaphore;
   // Counter per local segment for stable sequential numbering
   private readonly callCounters = new Map<string, number>();
 
-  public constructor(ctx: WorkflowContext, keyCtx: KeyContext, maxConcurrency: number) {
+  public constructor(
+    ctx: WorkflowContext,
+    keyCtx: KeyContext,
+    maxConcurrency: number,
+    limiter: AsyncSemaphore = new AsyncSemaphore(maxConcurrency),
+  ) {
     this.ctx = ctx;
     this.keyCtx = keyCtx;
     this.maxConcurrency = maxConcurrency;
+    this.limiter = limiter;
   }
 
   /** Call a semantic agent role. Requires an explicit `role`; no fallback. */
@@ -143,14 +155,16 @@ export class WorkflowBuilder {
     factories: ReadonlyArray<(builder: WorkflowBuilder) => Promise<T>>,
     options?: ParallelOptions,
   ): Promise<T[]> {
-    const limit = options?.concurrency ?? this.maxConcurrency;
-    const parallelKey = this.nextKey('parallel');
+    const requestedLimit = options?.concurrency ?? this.maxConcurrency;
+    assertPositiveInteger(requestedLimit, 'Parallel concurrency');
+    const limit = Math.min(requestedLimit, this.maxConcurrency);
+    const parallelSegment = this.nextSegment('parallel');
     const results: T[] = new Array(factories.length);
 
     // Build child builders with stable positional keys BEFORE any async work
     const childBuilders = factories.map((_, i) => {
-      const branchKey = childKeyContext(this.keyCtx, `${parallelKey}/branch:${i}`);
-      return new WorkflowBuilder(this.ctx, branchKey, this.maxConcurrency);
+      const branchKey = childKeyContext(this.keyCtx, `${parallelSegment}/branch:${i}`);
+      return new WorkflowBuilder(this.ctx, branchKey, this.maxConcurrency, this.limiter);
     });
 
     let index = 0;
@@ -178,14 +192,19 @@ export class WorkflowBuilder {
     initial: T,
     steps: ReadonlyArray<(value: T, builder: WorkflowBuilder) => Promise<T>>,
   ): Promise<T> {
-    const pipelineKey = this.nextKey('pipeline');
+    const pipelineSegment = this.nextSegment('pipeline');
     let current = initial;
     for (let i = 0; i < steps.length; i++) {
       if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
       const step = steps[i];
       if (!step) continue;
-      const childKey = childKeyContext(this.keyCtx, `${pipelineKey}/step:${i}`);
-      const childBuilder = new WorkflowBuilder(this.ctx, childKey, this.maxConcurrency);
+      const childKey = childKeyContext(this.keyCtx, `${pipelineSegment}/step:${i}`);
+      const childBuilder = new WorkflowBuilder(
+        this.ctx,
+        childKey,
+        this.maxConcurrency,
+        this.limiter,
+      );
       current = await step(current, childBuilder);
     }
     return current;
@@ -202,9 +221,15 @@ export class WorkflowBuilder {
     options?: WorkflowStepOptions,
   ): Promise<T> {
     if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
-    const callKey = this.nextKey(`workflow:${name}`);
-    const childKeyCtx = childKeyContext(this.keyCtx, callKey);
-    const childBuilder = new WorkflowBuilder(this.ctx, childKeyCtx, this.maxConcurrency);
+    const invocationSegment = this.nextSegment(`workflow:${name}`);
+    const callKey = buildCallKey(this.keyCtx, invocationSegment);
+    const childKeyCtx = childKeyContext(this.keyCtx, invocationSegment);
+    const childBuilder = new WorkflowBuilder(
+      this.ctx,
+      childKeyCtx,
+      this.maxConcurrency,
+      this.limiter,
+    );
 
     // Check cancellation again after any async readiness boundary
     if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
@@ -217,36 +242,48 @@ export class WorkflowBuilder {
    * Does not affect execution semantics.
    */
   public phase(name: string): WorkflowBuilder {
-    const childKey = childKeyContext(this.keyCtx, `phase:${name}`);
-    return new WorkflowBuilder(this.ctx, childKey, this.maxConcurrency);
+    const childKey = childKeyContext(this.keyCtx, this.nextSegment(`phase:${name}`));
+    return new WorkflowBuilder(this.ctx, childKey, this.maxConcurrency, this.limiter);
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
 
   private nextKey(localId: string): string {
+    return buildCallKey(this.keyCtx, this.nextSegment(localId));
+  }
+
+  private nextSegment(localId: string): string {
     const count = this.callCounters.get(localId) ?? 0;
     this.callCounters.set(localId, count + 1);
-    const uniqueLocal = count === 0 ? localId : `${localId}[${count}]`;
-    return buildCallKey(this.keyCtx, uniqueLocal);
+    return count === 0 ? localId : `${localId}[${count}]`;
   }
 
   private async runAgentStep(options: AgentStepOptions, callKey: string): Promise<AgentCallOutput> {
     // Replay from journal if available
-    const cached = await this.ctx.journal.get(callKey);
-    if (cached !== undefined) {
+    const cached = await raceWithSignal(this.ctx.journal.get(callKey), this.ctx.signal);
+    const cachedEntryExists =
+      cached !== undefined ||
+      (this.ctx.journal.has !== undefined &&
+        (await raceWithSignal(Promise.resolve(this.ctx.journal.has(callKey)), this.ctx.signal)));
+    if (cachedEntryExists) {
       return { role: options.role, result: cached, callKey };
     }
-
-    const runner = this.ctx.resolver(options.role);
 
     return this.withRetry(
       callKey,
       async () => {
         if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
-        this.ctx.onProgress?.({ kind: 'step.start', callKey, role: options.role });
-
         let result: unknown;
+        const release = await this.limiter.acquire(this.ctx.signal);
         try {
+          this.ctx.onProgress?.({ kind: 'step.start', callKey, role: options.role });
+          const runner = await raceWithSignal(
+            Promise.resolve(this.ctx.resolver(options.role)),
+            this.ctx.signal,
+          );
+          // A lazy resolver may settle after cancellation. Never invoke the
+          // returned runner unless the workflow is still active.
+          if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
           const callInput =
             options.context !== undefined
               ? { role: options.role, prompt: options.prompt, context: options.context }
@@ -261,13 +298,16 @@ export class WorkflowBuilder {
             options.role,
             callKey,
           );
+        } finally {
+          release();
         }
 
-        await this.ctx.journal.set(callKey, result);
+        await raceWithSignal(this.ctx.journal.set(callKey, result), this.ctx.signal);
         this.ctx.onProgress?.({ kind: 'step.complete', callKey, role: options.role });
         return { role: options.role, result, callKey } as AgentCallOutput;
       },
       options.retryPolicy,
+      options.role,
     );
   }
 
@@ -275,9 +315,14 @@ export class WorkflowBuilder {
     callKey: string,
     fn: () => Promise<T>,
     retryPolicy?: RetryPolicy,
+    role?: string,
   ): Promise<T> {
     const maxAttempts = retryPolicy?.maxAttempts ?? 1;
     const delayMs = retryPolicy?.delayMs ?? 0;
+    assertPositiveInteger(maxAttempts, 'Retry maxAttempts');
+    if (!Number.isFinite(delayMs) || delayMs < 0) {
+      throw new WorkflowConfigurationError('Retry delayMs must be a finite non-negative number.');
+    }
     let lastErr: unknown;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -288,9 +333,25 @@ export class WorkflowBuilder {
         if (err instanceof WorkflowCancelledError) throw err;
         if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
         lastErr = err;
-        this.ctx.onProgress?.({ kind: 'step.retry', callKey, attempt, error: err });
-        if (attempt < maxAttempts && delayMs > 0) {
-          await delay(delayMs, this.ctx.signal);
+        if (attempt < maxAttempts) {
+          this.ctx.onProgress?.({
+            kind: 'step.retry',
+            callKey,
+            attempt,
+            error: err,
+            ...(role !== undefined ? { role } : {}),
+          });
+          if (delayMs > 0) {
+            await delay(delayMs, this.ctx.signal);
+          }
+        } else {
+          this.ctx.onProgress?.({
+            kind: 'step.error',
+            callKey,
+            attempt,
+            error: err,
+            ...(role !== undefined ? { role } : {}),
+          });
         }
       }
     }
@@ -299,6 +360,67 @@ export class WorkflowBuilder {
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
+
+function assertPositiveInteger(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new WorkflowConfigurationError(`${label} must be a positive integer.`);
+  }
+}
+
+class AsyncSemaphore {
+  private available: number;
+  private readonly waiters: Array<{
+    readonly resolve: (release: () => void) => void;
+    readonly reject: (error: WorkflowCancelledError) => void;
+    readonly signal: AbortSignal;
+    readonly onAbort: () => void;
+  }> = [];
+
+  public constructor(limit: number) {
+    assertPositiveInteger(limit, 'Workflow concurrency');
+    this.available = limit;
+  }
+
+  public acquire(signal: AbortSignal): Promise<() => void> {
+    if (signal.aborted) return Promise.reject(new WorkflowCancelledError());
+    if (this.available > 0) {
+      this.available--;
+      return Promise.resolve(this.createRelease());
+    }
+
+    return new Promise<() => void>((resolve, reject) => {
+      const onAbort = (): void => {
+        const index = this.waiters.findIndex((waiter) => waiter.onAbort === onAbort);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(new WorkflowCancelledError());
+      };
+      const waiter = { resolve, reject, signal, onAbort };
+      this.waiters.push(waiter);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private createRelease(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+
+      while (this.waiters.length > 0) {
+        const waiter = this.waiters.shift();
+        if (!waiter) break;
+        waiter.signal.removeEventListener('abort', waiter.onAbort);
+        if (waiter.signal.aborted) {
+          waiter.reject(new WorkflowCancelledError());
+          continue;
+        }
+        waiter.resolve(this.createRelease());
+        return;
+      }
+      this.available++;
+    };
+  }
+}
 
 function combineSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
   const controller = new AbortController();

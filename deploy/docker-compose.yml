@@ -1,0 +1,25 @@
+services:
+  dark-kitchen:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: dark-kitchen:local
+    init: true
+    restart: unless-stopped
+    working_dir: /workspace
+    command: ['start', '--foreground', '--json']
+    environment:
+      NODE_ENV: production
+      DK_NO_DASHBOARD: ${DK_NO_DASHBOARD:-1}
+    env_file:
+      - path: ${DARK_KITCHEN_ENV_FILE:-./dark-kitchen.env}
+        required: false
+    volumes:
+      - ${DARK_KITCHEN_PROJECT:-../example-project}:/workspace
+      - dark-kitchen-runtime:/workspace/.dark-kitchen/runtime
+      - dark-kitchen-tools:/home/node/.dark-kitchen
+    stop_grace_period: 45s
+
+volumes:
+  dark-kitchen-runtime:
+  dark-kitchen-tools:

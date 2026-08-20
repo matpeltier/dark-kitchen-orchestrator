@@ -94,6 +94,45 @@ export interface StartAgentSessionInput {
   readonly workspaceId: WorkspaceId;
 }
 
+/**
+ * Durable ownership metadata for a harness session.
+ *
+ * The profile snapshot is intentionally provider-neutral at the core boundary.
+ * Runtime implementations validate it before attempting a restart. Keeping the
+ * exact runtime instance id prevents controls from guessing an adapter from a
+ * session state or from whichever adapter happened to register last.
+ */
+export interface AgentSessionRuntimeBinding {
+  readonly sessionId: AgentSessionId;
+  readonly runtimeId: string;
+  readonly runtimeKind: string;
+  readonly profileId: string;
+  readonly profileSnapshot: unknown;
+  readonly initialPrompt: string;
+  readonly roleId?: string;
+  readonly model?: string;
+  readonly reasoning?: string;
+  readonly lastActivityAt: string;
+  readonly lastError?: string;
+  readonly usage?: Readonly<Record<string, number>>;
+  readonly sourceSessionId?: AgentSessionId;
+  readonly sourceAction?: 'restart' | 'retry' | 'switch-profile';
+  readonly controlRequestId?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface AgentSessionRuntimeBindingStore {
+  getAgentSessionRuntimeBinding(
+    agentSessionId: AgentSessionId,
+  ): Promise<AgentSessionRuntimeBinding | undefined>;
+  saveAgentSessionRuntimeBinding(binding: AgentSessionRuntimeBinding): Promise<void>;
+  listAgentSessionRuntimeBindings(options?: {
+    readonly sourceSessionId?: AgentSessionId;
+    readonly controlRequestId?: string;
+  }): Promise<AgentSessionRuntimeBinding[]>;
+}
+
 export interface HarnessInput {
   readonly sessionId: AgentSessionId;
   readonly content: string;
@@ -119,6 +158,43 @@ export interface ChannelMessage {
   readonly body: string;
   readonly sentAt: string;
   readonly author?: string;
+}
+
+/** Durable outbound-message to intervention correlation. */
+export interface ChannelMessageCorrelation {
+  readonly transportId: string;
+  readonly messageId: ChannelMessageId;
+  readonly address: ChannelAddress;
+  readonly interventionId: InterventionId;
+  readonly code: string;
+  readonly sentAt: string;
+  readonly active: boolean;
+}
+
+export interface ChannelInboundReceipt {
+  readonly transportId: string;
+  readonly messageId: ChannelMessageId;
+  readonly address: ChannelAddress;
+  readonly processedAt: string;
+}
+
+/** Persistence boundary used by channel adapters across daemon restarts. */
+export interface ChannelCorrelationStore {
+  saveChannelMessageCorrelation(correlation: ChannelMessageCorrelation): Promise<void>;
+  getActiveChannelMessageCorrelation(
+    transportId: string,
+    address: ChannelAddress,
+    messageId: ChannelMessageId,
+  ): Promise<ChannelMessageCorrelation | undefined>;
+  listActiveChannelMessageCorrelations(options?: {
+    readonly transportId?: string;
+    readonly address?: ChannelAddress;
+    readonly interventionId?: InterventionId;
+    readonly code?: string;
+  }): Promise<ChannelMessageCorrelation[]>;
+  deactivateChannelMessageCorrelations(interventionId: InterventionId): Promise<void>;
+  hasProcessedChannelInbound(receipt: Omit<ChannelInboundReceipt, 'processedAt'>): Promise<boolean>;
+  saveProcessedChannelInbound(receipt: ChannelInboundReceipt): Promise<void>;
 }
 
 export type ChannelMessageHandler = (message: ChannelMessage) => void | Promise<void>;
@@ -161,18 +237,33 @@ export interface RuntimeStore {
   saveExecutionNode(executionNode: ExecutionNode): Promise<void>;
   getRun(runId: RunId): Promise<Run | undefined>;
   saveRun(run: Run): Promise<void>;
+  listRuns(): Promise<Run[]>;
   getWorkflowRun(workflowRunId: WorkflowRunId): Promise<WorkflowRun | undefined>;
   saveWorkflowRun(workflowRun: WorkflowRun): Promise<void>;
+  listWorkflowRuns(): Promise<WorkflowRun[]>;
   getAgentSession(agentSessionId: AgentSessionId): Promise<AgentSession | undefined>;
   saveAgentSession(agentSession: AgentSession): Promise<void>;
+  listAgentSessions(): Promise<AgentSession[]>;
   getWorkspace(workspaceId: WorkspaceId): Promise<Workspace | undefined>;
   saveWorkspace(workspace: Workspace): Promise<void>;
+  listWorkspaces(): Promise<Workspace[]>;
   getIntervention(interventionId: InterventionId): Promise<Intervention | undefined>;
   saveIntervention(intervention: Intervention): Promise<void>;
+  listInterventions(): Promise<Intervention[]>;
   getConfiguration(configurationId: ConfigurationId): Promise<Configuration | undefined>;
   saveConfiguration(configuration: Configuration): Promise<void>;
   appendEvent(event: DomainEvent): Promise<void>;
   getEvent(eventId: EventId): Promise<DomainEvent | undefined>;
+  listEvents(options?: {
+    type?: string;
+    limit?: number;
+    afterSeq?: number;
+  }): Promise<DomainEvent[]>;
+  getDiagnostics(): {
+    schemaVersion: number;
+    counts: Record<string, number>;
+    integrityCheck: string;
+  };
 }
 
 export type { DomainEventPayload, DomainEventType, DomainEventOfType };

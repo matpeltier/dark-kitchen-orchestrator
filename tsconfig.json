@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/core" },
     { "path": "./packages/process-execution" },
+    { "path": "./packages/capabilities" },
     { "path": "./packages/adapter-contract-fixture" },
     { "path": "./packages/config" },
     { "path": "./packages/runtime-store-sqlite" },

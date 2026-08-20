@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
-import { SqliteRuntimeStore } from './store.js';
+import { redactStoredPrompt, SqliteRuntimeStore } from './store.js';
 import type { Project, Task, Run, Workspace, Intervention } from '@dark-kitchen/core';
 import {
   createProjectId,
@@ -20,6 +20,16 @@ function now() {
 }
 
 describe('SqliteRuntimeStore - migrations', () => {
+  it('redacts secrets at the persistence boundary', () => {
+    const prompt =
+      'token=github_pat_abcdefghijklmnopqrstuvwxyz123456 password: hunter2 url=https://x.test?a=1&api_key=top-secret';
+    const stored = redactStoredPrompt(prompt);
+    expect(stored).not.toContain('github_pat_');
+    expect(stored).not.toContain('hunter2');
+    expect(stored).not.toContain('top-secret');
+    expect(stored).toContain('[REDACTED]');
+  });
+
   it('opens an empty database and applies all migrations', async () => {
     const store = await SqliteRuntimeStore.open({ databasePath: ':memory:' });
     const diag = store.getDiagnostics();
@@ -80,6 +90,7 @@ describe('SqliteRuntimeStore - CRUD', () => {
       id: createTaskId('task-1'),
       projectId: project.id,
       title: 'Implement feature',
+      labels: ['frontend', 'high-risk'],
       status: 'backlog',
       createdAt: now(),
       updatedAt: now(),
@@ -88,6 +99,7 @@ describe('SqliteRuntimeStore - CRUD', () => {
     const fetched = await store.getTask(task.id);
     expect(fetched?.title).toBe('Implement feature');
     expect(fetched?.status).toBe('backlog');
+    expect(fetched?.labels).toEqual(['frontend', 'high-risk']);
   });
 
   it('upserts a task (idempotent)', async () => {

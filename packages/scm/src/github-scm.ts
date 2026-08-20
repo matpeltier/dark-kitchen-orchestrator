@@ -20,6 +20,7 @@ import { createCheckId, createPullRequestId, createRepositoryId } from '@dark-ki
 import type {
   CheckPollPolicy,
   CreatePullRequestInput,
+  DeleteBranchInput,
   FullScmAdapter,
   MergePullRequestInput,
   PushBranchInput,
@@ -75,18 +76,33 @@ export class GitHubScmAdapter implements FullScmAdapter {
   }
 
   public async createPullRequest(input: CreatePullRequestInput): Promise<PullRequest> {
+    validatePullRequestInput(input);
+    const existing = await this.findReusablePullRequest(input.sourceBranch, input.targetBranch);
+    if (existing) return existing;
+
     // Build the PR body with task context (not GitHub-specific close syntax
     // for cross-tracker links).
     const body = buildPrBody(input);
 
-    const { data } = await this.octokit.pulls.create({
-      owner: this.config.owner,
-      repo: this.config.repo,
-      head: input.sourceBranch,
-      base: input.targetBranch,
-      title: input.title,
-      body,
-    });
+    let data;
+    try {
+      ({ data } = await this.octokit.pulls.create({
+        owner: this.config.owner,
+        repo: this.config.repo,
+        head: input.sourceBranch,
+        base: input.targetBranch,
+        title: redactSensitive(input.title),
+        body,
+      }));
+    } catch (error) {
+      // GitHub returns 422 when another concurrent lifecycle call created the
+      // same PR after our preflight lookup. Resolve that race idempotently.
+      if ((error as { status?: number }).status === 422) {
+        const raced = await this.findReusablePullRequest(input.sourceBranch, input.targetBranch);
+        if (raced) return raced;
+      }
+      throw error;
+    }
 
     return normalizePullRequest(data, this.config.owner, this.config.repo);
   }
@@ -108,14 +124,27 @@ export class GitHubScmAdapter implements FullScmAdapter {
     _repositoryId: RepositoryId,
     sourceBranch: string,
   ): Promise<PullRequest | undefined> {
+    return this.findReusablePullRequest(sourceBranch);
+  }
+
+  private async findReusablePullRequest(
+    sourceBranch: string,
+    targetBranch?: string,
+  ): Promise<PullRequest | undefined> {
     const { data } = await this.octokit.pulls.list({
       owner: this.config.owner,
       repo: this.config.repo,
       head: `${this.config.owner}:${sourceBranch}`,
-      state: 'open',
+      state: 'all',
+      per_page: 100,
     });
-    if (data.length === 0) return undefined;
-    return normalizePullRequest(data[0]!, this.config.owner, this.config.repo);
+    const candidates = targetBranch ? data.filter((pr) => pr.base.ref === targetBranch) : data;
+    const reusable =
+      candidates.find((pr) => pr.state === 'open') ??
+      candidates.find((pr) => pr.state === 'closed' && pr.merged_at !== null);
+    return reusable
+      ? normalizePullRequest(reusable, this.config.owner, this.config.repo)
+      : undefined;
   }
 
   public async listChecks(pullRequestId: PullRequestId): Promise<readonly Check[]> {
@@ -140,16 +169,44 @@ export class GitHubScmAdapter implements FullScmAdapter {
     pullRequestId: PullRequestId,
     policy: CheckPollPolicy,
   ): Promise<readonly Check[]> {
-    const deadline = Date.now() + policy.timeoutMs;
-    while (Date.now() < deadline) {
-      const checks = await this.listChecks(pullRequestId);
-      const allTerminal = checks.every(
-        (c) => c.status === 'passed' || c.status === 'failed' || c.status === 'cancelled',
-      );
-      if (allTerminal) return checks;
-      await sleep(policy.intervalMs);
+    if (!Number.isFinite(policy.intervalMs) || policy.intervalMs <= 0) {
+      throw new ScmError('Check poll interval must be a positive finite number');
     }
-    return this.listChecks(pullRequestId);
+    if (!Number.isFinite(policy.timeoutMs) || policy.timeoutMs < 0) {
+      throw new ScmError('Check poll timeout must be a non-negative finite number');
+    }
+    const deadline = Date.now() + policy.timeoutMs;
+    let lastChecks: readonly Check[] = [];
+    let lastError: unknown;
+    do {
+      try {
+        lastChecks = await this.listChecks(pullRequestId);
+        lastError = undefined;
+        const required = policy.requiredChecks ?? [];
+        const observed =
+          required.length > 0
+            ? required.map((name) => lastChecks.find((check) => check.name === name))
+            : lastChecks;
+        const allTerminal =
+          observed.length > 0 &&
+          observed.every(
+            (c) =>
+              c !== undefined &&
+              (c.status === 'passed' || c.status === 'failed' || c.status === 'cancelled'),
+          );
+        if (allTerminal) return lastChecks;
+      } catch (error) {
+        lastError = error;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(policy.intervalMs, remaining));
+    } while (Date.now() <= deadline);
+
+    if (lastError) {
+      throw new ScmError('SCM check polling failed until timeout', lastError);
+    }
+    return lastChecks;
   }
 
   public async merge(input: MergePullRequestInput): Promise<PullRequest> {
@@ -211,6 +268,21 @@ export class GitHubScmAdapter implements FullScmAdapter {
     });
     return data.state === 'closed' && data.merged === true;
   }
+
+  public async deleteBranch(input: DeleteBranchInput): Promise<void> {
+    validateBranchName(input.branchName);
+    await this.octokit.git
+      .deleteRef({
+        owner: this.config.owner,
+        repo: this.config.repo,
+        ref: `heads/${input.branchName}`,
+      })
+      .catch((err: unknown) => {
+        // 404 means the branch was already removed (or never existed).
+        const status = (err as { status?: number }).status;
+        if (status !== 404) throw err;
+      });
+  }
 }
 
 // ─── Mock SCM adapter for testing ────────────────────────────────────────────
@@ -236,6 +308,7 @@ export class MockScmAdapter implements FullScmAdapter {
   public readonly provider = PROVIDER;
   private nextNumber = 1;
   private readonly prs = new Map<number, MockPullRequest>();
+  private readonly createsInFlight = new Map<string, Promise<PullRequest>>();
   public lastPrBody: string | undefined;
 
   public async getRepository(reference: ScmReference): Promise<Repository> {
@@ -256,12 +329,26 @@ export class MockScmAdapter implements FullScmAdapter {
   }
 
   public async createPullRequest(input: CreatePullRequestInput): Promise<PullRequest> {
+    const key = `${input.repositoryId}\u0000${input.sourceBranch}\u0000${input.targetBranch}`;
+    const current = this.createsInFlight.get(key);
+    if (current) return current;
+    const creation = this.createPullRequestOnce(input).finally(() => {
+      this.createsInFlight.delete(key);
+    });
+    this.createsInFlight.set(key, creation);
+    return creation;
+  }
+
+  private async createPullRequestOnce(input: CreatePullRequestInput): Promise<PullRequest> {
+    validatePullRequestInput(input);
+    const existing = this.findMockReusable(input.sourceBranch, input.targetBranch);
+    if (existing) return existing;
     const number = this.nextNumber++;
     const body = buildPrBody(input);
     this.lastPrBody = body;
     const pr: MockPullRequest = {
       number,
-      title: input.title,
+      title: redactSensitive(input.title),
       body,
       sourceBranch: input.sourceBranch,
       targetBranch: input.targetBranch,
@@ -288,9 +375,17 @@ export class MockScmAdapter implements FullScmAdapter {
     _repositoryId: RepositoryId,
     sourceBranch: string,
   ): Promise<PullRequest | undefined> {
-    const pr = [...this.prs.values()].find(
-      (p) => p.sourceBranch === sourceBranch && p.state === 'open',
-    );
+    return this.findMockReusable(sourceBranch);
+  }
+
+  private findMockReusable(sourceBranch: string, targetBranch?: string): PullRequest | undefined {
+    const candidates = [...this.prs.values()].filter((p) => p.sourceBranch === sourceBranch);
+    const matching = targetBranch
+      ? candidates.filter((candidate) => candidate.targetBranch === targetBranch)
+      : candidates;
+    const pr =
+      matching.find((candidate) => candidate.state === 'open') ??
+      matching.find((candidate) => candidate.merged);
     return pr ? normalizeMockPr(pr) : undefined;
   }
 
@@ -341,6 +436,10 @@ export class MockScmAdapter implements FullScmAdapter {
     return this.prs.get(n)?.merged === true;
   }
 
+  public async deleteBranch(_input: DeleteBranchInput): Promise<void> {
+    // No-op in mock.
+  }
+
   /** Test helper: set mock checks on a PR. */
   public setChecks(pullRequestId: PullRequestId, checks: MockCheck[]): void {
     const n = extractPrNumber(pullRequestId);
@@ -353,12 +452,12 @@ export class MockScmAdapter implements FullScmAdapter {
 
 function buildPrBody(input: CreatePullRequestInput): string {
   const lines: string[] = [];
-  if (input.body) lines.push(input.body);
+  if (input.body) lines.push(redactSensitive(input.body));
   if (input.taskId) {
     lines.push('');
     lines.push(`<!-- dk:task-id:${input.taskId} -->`);
     if (input.taskTitle) {
-      lines.push(`<!-- dk:task-title:${input.taskTitle} -->`);
+      lines.push(`<!-- dk:task-title:${sanitizeCommentValue(input.taskTitle)} -->`);
     }
   }
   return lines.join('\n');
@@ -370,21 +469,19 @@ function normalizePullRequest(
     title: string;
     body?: string | null;
     state: string;
-    head: { ref: string };
+    head: { ref: string; sha: string };
     base: { ref: string };
     html_url: string;
     merged?: boolean | null;
+    merged_at?: string | null;
   },
   owner: string,
   repo: string,
 ): PullRequest {
   const id = createPullRequestId(`${PROVIDER}:${owner}/${repo}#${data.number}`);
   const repositoryId = createRepositoryId(`${PROVIDER}:${owner}/${repo}`);
-  const status: PullRequest['status'] = data.merged
-    ? 'merged'
-    : data.state === 'closed'
-      ? 'closed'
-      : 'open';
+  const status: PullRequest['status'] =
+    data.merged || data.merged_at ? 'merged' : data.state === 'closed' ? 'closed' : 'open';
   return {
     id,
     repositoryId,
@@ -393,6 +490,7 @@ function normalizePullRequest(
     status,
     sourceBranch: data.head.ref,
     targetBranch: data.base.ref,
+    headSha: data.head.sha,
     reference: { provider: PROVIDER, id: String(data.number), url: data.html_url },
   };
 }
@@ -413,6 +511,7 @@ function normalizeMockPr(pr: MockPullRequest): PullRequest {
     status,
     sourceBranch: pr.sourceBranch,
     targetBranch: pr.targetBranch,
+    headSha: pr.headSha,
     reference: { provider: PROVIDER, id: String(pr.number) },
   };
 }
@@ -449,4 +548,65 @@ function extractPrNumber(pullRequestId: PullRequestId): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function sanitizeCommentValue(value: string): string {
+  return value
+    .replace(/-->/g, '--&gt;')
+    .replace(/[\r\n]+/g, ' ')
+    .slice(0, 500);
+}
+
+function validateBranchName(branchName: string): void {
+  if (
+    !branchName ||
+    branchName.startsWith('/') ||
+    branchName.endsWith('/') ||
+    branchName.endsWith('.') ||
+    branchName.endsWith('.lock') ||
+    branchName.startsWith('.') ||
+    branchName.includes('..') ||
+    branchName.includes('//') ||
+    branchName.includes('@{') ||
+    branchName === '@' ||
+    hasControlOrSpace(branchName) ||
+    /[~^:?*[\\]/.test(branchName)
+  ) {
+    throw new ScmError(`Invalid branch name "${branchName}"`);
+  }
+}
+
+function validatePullRequestInput(input: CreatePullRequestInput): void {
+  validateBranchName(input.sourceBranch);
+  validateBranchName(input.targetBranch);
+  if (input.sourceBranch === input.targetBranch) {
+    throw new ScmError('Pull request source and target branches must differ');
+  }
+  if (!input.title.trim() || input.title.length > 256 || hasControlCharacters(input.title)) {
+    throw new ScmError('Pull request title is empty, multiline, or exceeds 256 characters');
+  }
+  if (input.body && input.body.length > 65_000) {
+    throw new ScmError('Pull request body exceeds the safe size limit');
+  }
+}
+
+function redactSensitive(value: string): string {
+  return value
+    .replace(/\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '[REDACTED]')
+    .replace(/((?:bearer|token|api[_-]?key|secret|password)\s*[:=]\s*)\S+/gi, '$1[REDACTED]')
+    .replace(/([?&](?:token|api[_-]?key|secret|password)=)[^&\s]+/gi, '$1[REDACTED]');
+}
+
+function hasControlOrSpace(value: string): boolean {
+  return (
+    [...value].some((character) => (character.codePointAt(0) ?? 0) <= 32) ||
+    hasControlCharacters(value)
+  );
+}
+
+function hasControlCharacters(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127;
+  });
 }

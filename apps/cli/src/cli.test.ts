@@ -1,7 +1,9 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, rm } from 'node:fs/promises';
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import type { DarkKitchenConfig } from '@dark-kitchen/config';
+import type { RoleResolver } from '@dark-kitchen/workflow-engine';
 import { DarkKitchenDaemon } from './daemon.js';
 import { runDoctor } from './doctor.js';
 
@@ -11,6 +13,8 @@ describe('DarkKitchenDaemon', () => {
   beforeEach(async () => {
     projectRoot = join(tmpdir(), `dk-daemon-${Date.now()}`);
     await mkdir(projectRoot, { recursive: true });
+    process.env['DK_DASHBOARD_PORT'] = '18900';
+    process.env['DK_MCP_PORT'] = '18901';
   });
 
   afterEach(async () => {
@@ -62,6 +66,70 @@ describe('DarkKitchenDaemon', () => {
     const fetched = await daemon2.getStore()!.getIntervention(intervention.id);
     expect(fetched?.status).toBe('open');
     await daemon2.stop();
+  });
+
+  it('routes a user-managed DeepSeek profile through the native DSH adapter', async () => {
+    const executable = join(projectRoot, 'fake-dsh');
+    await writeFile(
+      executable,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then',
+        '  printf "@deepseek-ai/dsh 0.1.0-rc.7\\n"',
+        '  exit 0',
+        'fi',
+        'test -n "$DARK_KITCHEN_PAYLOAD_FILE" || exit 19',
+        'test -f "$DARK_KITCHEN_PAYLOAD_FILE" || exit 20',
+        'printf "dsh-native-ok"',
+      ].join('\n'),
+      'utf8',
+    );
+    await chmod(executable, 0o755);
+
+    const config: DarkKitchenConfig = {
+      version: 1,
+      harnessProfiles: [
+        {
+          managed: false,
+          id: 'dsh-existing-profile',
+          kind: 'deepseek-harness',
+          description: 'Preserve the user DSH profile and home.',
+        },
+      ],
+      roles: [{ id: 'implementer', harnessProfileId: 'dsh-existing-profile' }],
+    };
+    const daemon = new DarkKitchenDaemon({ projectRoot });
+    const internals = daemon as unknown as {
+      config: DarkKitchenConfig;
+      agentControls: { registerSession(): Promise<void> };
+      buildRoleResolver(
+        profile: NonNullable<DarkKitchenConfig['harnessProfiles']>[number],
+      ): Promise<RoleResolver>;
+    };
+    internals.config = config;
+    internals.agentControls = { registerSession: () => Promise.resolve() };
+    const priorExecutable = process.env['DSH_EXECUTABLE'];
+    process.env['DSH_EXECUTABLE'] = executable;
+    try {
+      const resolver = await internals.buildRoleResolver(config.harnessProfiles![0]!);
+      const runner = await resolver('implementer');
+      await expect(
+        runner(
+          {
+            role: 'implementer',
+            prompt: 'payload that must not appear in argv',
+            context: { acceptance: 'native DSH routing' },
+            workspacePath: projectRoot,
+            runId: 'run-dsh',
+            taskId: 'task-dsh',
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('dsh-native-ok');
+    } finally {
+      if (priorExecutable === undefined) delete process.env['DSH_EXECUTABLE'];
+      else process.env['DSH_EXECUTABLE'] = priorExecutable;
+    }
   });
 });
 

@@ -1,0 +1,20 @@
+Dark Kitchen
+Copyright (c) 2024-2026 Dark Kitchen Contributors
+
+This distribution contains code adapted from codex-dynamic-workflows:
+
+  Project: codex-dynamic-workflows
+  Source: https://github.com/six-ddc/codex-dynamic-workflows
+  Author: six-ddc
+  License: MIT
+
+Dark Kitchen's workflow engine removes provider-specific SDK coupling and adds
+semantic role routing, deterministic nested/parallel call identities, durable
+journal replay, bounded concurrency/retries, and structured cancellation.
+
+The upstream copyright and complete MIT license text are retained in
+packages/workflow-engine/NOTICE.md. Third-party packages distributed through
+npm or the container retain their own licenses and notices in their package
+metadata/files. Optional managed capability providers download separately
+pinned upstream artifacts only after an explicit provisioning plan and
+approval; their upstream licenses apply to those artifacts.
