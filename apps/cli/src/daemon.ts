@@ -729,6 +729,9 @@ export class DarkKitchenDaemon {
                                 name: `verification-evidence-${String(index + 1)}`,
                                 artifactRef,
                                 capturedAt: new Date().toISOString(),
+                                ...(output.evidenceAttestations?.[artifactRef]
+                                  ? { sha256: output.evidenceAttestations[artifactRef] }
+                                  : {}),
                               })),
                             }
                           : {}),

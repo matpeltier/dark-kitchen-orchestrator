@@ -11,7 +11,9 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { TaskId, RunId } from '@dark-kitchen/core';
 import { createProjectId, createRepositoryId } from '@dark-kitchen/core';
 import { controlArgument, defineProcess, executeProcess } from '@dark-kitchen/process-execution';
@@ -221,6 +223,10 @@ export async function executeWorkflow(
         ]
       : undefined;
 
+    const evidenceAttestations = result.evidenceRefs
+      ? await attestArtifacts(result.evidenceRefs, workspace.path)
+      : undefined;
+
     outcome = {
       success: workflowSucceeded,
       summary: result.summary,
@@ -233,6 +239,7 @@ export async function executeWorkflow(
       ...(result.noCodeOutcome ? { noCodeOutcome: true } : {}),
       ...(verificationSummary ? { verificationGateSummary: verificationSummary } : {}),
       ...(result.evidenceRefs ? { evidenceRefs: result.evidenceRefs } : {}),
+      ...(evidenceAttestations ? { evidenceAttestations } : {}),
       ...(verificationResults ? { verificationResults } : {}),
       ...(verificationRequired && config.verificationProfileId
         ? { requiredVerificationProfiles: [config.verificationProfileId] }
@@ -379,7 +386,48 @@ async function getNewCommits(worktreePath: string, targetBranch: string): Promis
     const output = (await gitExec(worktreePath, ['log', '--format=%H', `${baseRef}..HEAD`])).trim();
     return output ? output.split('\n') : [];
   } catch {
-    const output = (await gitExec(worktreePath, ['rev-list', '--max-count=5', 'HEAD'])).trim();
-    return output ? output.split('\n') : [];
+    try {
+      const output = (await gitExec(worktreePath, ['rev-list', '--max-count=5', 'HEAD'])).trim();
+      return output ? output.split('\n') : [];
+    } catch {
+      // Fresh repository with no commits yet.
+      return [];
+    }
   }
+}
+
+/**
+ * Compute `sha256:<hex>` digests for readable local evidence artifacts.
+ * Relative references resolve against the task worktree; absolute paths and
+ * `file://` URLs are accepted as-is. Unreadable references stay un-attested
+ * metadata (never a fabricated digest).
+ */
+async function attestArtifacts(
+  refs: readonly string[],
+  baseDir: string,
+): Promise<Readonly<Record<string, string>>> {
+  const attestations: Record<string, string> = {};
+  for (const ref of refs) {
+    const path = resolveArtifactPath(ref, baseDir);
+    if (!path) continue;
+    try {
+      const data = await readFile(path);
+      attestations[ref] = `sha256:${createHash('sha256').update(data).digest('hex')}`;
+    } catch {
+      // keep un-attested
+    }
+  }
+  return attestations;
+}
+
+function resolveArtifactPath(ref: string, baseDir: string): string | undefined {
+  if (ref.startsWith('file://')) {
+    try {
+      return fileURLToPath(ref);
+    } catch {
+      return undefined;
+    }
+  }
+  if (isAbsolute(ref)) return ref;
+  return resolve(baseDir, ref);
 }

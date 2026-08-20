@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -87,5 +88,46 @@ describe('executeWorkflow verification environment', () => {
       'teardown',
     ]);
     await expect(readFile(join(root, 'should-never-exist'), 'utf8')).rejects.toThrow();
+  });
+
+  it('attests readable evidence artifacts and leaves unreadable refs un-attested', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dark-kitchen-workflow-executor-'));
+    roots.push(root);
+    await execFileAsync('git', ['init', '--initial-branch=main'], { cwd: root });
+    await writeFile(join(root, 'shot.png'), 'fake-png-bytes');
+    const expected = `sha256:${createHash('sha256').update('fake-png-bytes').digest('hex')}`;
+
+    const roleResolver: RoleResolver = async () => async () => 'verified';
+    const workflow: WorkflowFn<WorkflowExecutorResult> = async (builder) => {
+      await builder.agent({ role: 'implementer', prompt: 'implement' });
+      return {
+        summary: 'verified',
+        repositoryTestsPassed: true,
+        reviewPassed: true,
+        verificationPassed: true,
+        verificationSummary: 'verified',
+        noCodeOutcome: true,
+        evidenceRefs: ['shot.png', '/definitely/missing/artifact.png'],
+      };
+    };
+
+    const outcome = await executeWorkflow(
+      { id: createTaskId('task-attest'), title: 'Attest evidence' },
+      createRunId('run-attest'),
+      {
+        databasePath: join(root, 'runtime.db'),
+        worktreesBaseDir: join(root, 'worktrees'),
+        repositoryPath: root,
+        repositoryId: 'repository',
+      },
+      {
+        workspaceManager: { allocatePrimaryWorktree: async () => ({ path: root }) },
+        roleResolver,
+        workflow,
+      },
+    );
+
+    expect(outcome.evidenceAttestations?.['shot.png']).toBe(expected);
+    expect(outcome.evidenceAttestations?.['/definitely/missing/artifact.png']).toBeUndefined();
   });
 });

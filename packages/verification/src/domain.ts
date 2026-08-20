@@ -66,6 +66,8 @@ export interface VerificationEvidence {
   /** Reference to artifact storage (not the actual binary). */
   readonly artifactRef: string;
   readonly capturedAt: string;
+  /** Content digest (`sha256:<hex>`) when the artifact was readable at capture time. */
+  readonly sha256?: string;
   readonly metadata?: Record<string, unknown>;
 }
 

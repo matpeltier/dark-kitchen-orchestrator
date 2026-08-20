@@ -9,6 +9,7 @@ Notable user-visible changes to Dark Kitchen are documented here. Tagged GitHub 
 - Startup crash recovery: the daemon reconciles persisted runs, resuming `running`/`interrupted` runs through durable journal replay and re-seeding human-gated `waiting`/`blocked` runs as paused.
 - Graceful shutdown marks in-flight runs `interrupted` so the next start resumes them instead of silently re-scheduling.
 - The SSE dashboard now reports a clean "port already in use" error instead of crashing with an unhandled `EADDRINUSE`.
+- Readable local verification evidence is recorded with a `sha256` content digest; commit discovery no longer fails on a fresh repository with no commits.
 
 ## 0.1.1 - 2026-08-20
 
@@ -33,7 +34,7 @@ Notable user-visible changes to Dark Kitchen are documented here. Tagged GitHub 
 
 - Arbitrary native/custom harness plugins still require explicit host loading and an allowlist.
 - Fresh DeepSeek Harness rc.8 resolution currently requires an isolated `@smithy/core` 3.33.2 override until its upstream dependency range is published consistently.
-- Verification environment commands and per-session MCP selection are operational, but referenced artifacts are not yet cryptographically attested; independent required SCM checks remain essential.
+- Verification environment commands and per-session MCP selection are operational. Readable local evidence artifacts are now recorded with a `sha256` digest; unreadable or remote references remain un-attested, so independent required SCM checks stay essential.
 
 ## 0.1.0
 

@@ -68,6 +68,8 @@ export interface WorkflowOutcome {
   readonly worktreeClean?: boolean;
   readonly verificationGateSummary?: string;
   readonly evidenceRefs?: readonly string[];
+  /** Content digests (`sha256:<hex>`) keyed by evidence reference when readable. */
+  readonly evidenceAttestations?: Readonly<Record<string, string>>;
   readonly verificationResults?: readonly VerificationProof[];
   readonly requiredVerificationProfiles?: readonly string[];
   readonly noCodeOutcome?: boolean;
