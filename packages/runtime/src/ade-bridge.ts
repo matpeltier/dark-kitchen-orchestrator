@@ -163,7 +163,7 @@ export class SseDashboardAdapter implements AdeAdapter {
     this.options = options;
   }
 
-  public start(): void {
+  public start(): Promise<void> {
     const port = this.options.port ?? 18800;
     const host = this.options.host ?? '127.0.0.1';
 
@@ -208,8 +208,12 @@ export class SseDashboardAdapter implements AdeAdapter {
       res.end(buildDashboardHtml(port));
     });
 
-    this.server.listen(port, host, () => {
-      process.stderr.write(`[ADE] Dashboard: http://${host}:${port}\n`);
+    return new Promise<void>((resolve, reject) => {
+      this.server!.once('error', reject);
+      this.server!.listen(port, host, () => {
+        process.stderr.write(`[ADE] Dashboard: http://${host}:${port}\n`);
+        resolve();
+      });
     });
   }
 

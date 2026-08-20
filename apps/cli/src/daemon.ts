@@ -160,7 +160,17 @@ export class DarkKitchenDaemon {
       this.adeBridge = new ADEBridge();
       const dashboard = new SseDashboardAdapter({ port });
       this.adeBridge.register(dashboard);
-      dashboard.start();
+      try {
+        await dashboard.start();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code === 'EADDRINUSE') {
+          throw new Error(
+            `Dashboard port ${port} is already in use. Stop the other Dark Kitchen daemon or set DK_DASHBOARD_PORT.`,
+          );
+        }
+        throw error;
+      }
       this.dashboardPort = port;
     }
 
@@ -740,6 +750,7 @@ export class DarkKitchenDaemon {
           },
           lifecycleOrchestrator,
           interventionService: this.interventionService,
+          store: this.store,
           releaseWorktree: async (taskId) => {
             const workspace = await workspaceManager.getPrimaryWorktree(taskId);
             if (!workspace) return;
@@ -749,6 +760,10 @@ export class DarkKitchenDaemon {
         },
       );
 
+      const recovery = await this.daemonLoop.reconcile();
+      if (recovery.resumed > 0 || recovery.paused > 0 || recovery.skipped > 0) {
+        this.log('info', 'Recovered interrupted runs', recovery);
+      }
       this.daemonLoop.start();
     }
 
@@ -827,6 +842,17 @@ export class DarkKitchenDaemon {
     }
   }
 
+  private async markRunningRunsInterrupted(): Promise<void> {
+    if (!this.store) return;
+    const runs = await this.store.listRuns().catch(() => []);
+    const now = new Date().toISOString();
+    for (const run of runs) {
+      if (run.state === 'running' || run.state === 'starting' || run.state === 'queued') {
+        await this.store.saveRun({ ...run, state: 'interrupted', updatedAt: now }).catch(() => {});
+      }
+    }
+  }
+
   private async recordRun(
     runId: import('@dark-kitchen/core').RunId,
     task: import('@dark-kitchen/core').Task,
@@ -898,6 +924,7 @@ export class DarkKitchenDaemon {
     this.channelGateway?.destroy();
     await this.adeBridge?.destroy();
     await this.mcpHttpServer?.close();
+    await this.markRunningRunsInterrupted();
     this.store?.close();
 
     for (const cb of this.shutdownCallbacks) await cb();

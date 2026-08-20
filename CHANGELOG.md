@@ -4,7 +4,11 @@ Notable user-visible changes to Dark Kitchen are documented here. Tagged GitHub 
 
 ## Unreleased
 
-No user-visible changes yet.
+### Added
+
+- Startup crash recovery: the daemon reconciles persisted runs, resuming `running`/`interrupted` runs through durable journal replay and re-seeding human-gated `waiting`/`blocked` runs as paused.
+- Graceful shutdown marks in-flight runs `interrupted` so the next start resumes them instead of silently re-scheduling.
+- The SSE dashboard now reports a clean "port already in use" error instead of crashing with an unhandled `EADDRINUSE`.
 
 ## 0.1.1 - 2026-08-20
 

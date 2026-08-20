@@ -154,5 +154,5 @@ const context: McpContext = {
 5. Plan and approve any managed capability changes through the two-step lifecycle.
 6. Set autonomous approval only when the task is ready. The scheduler allocates/reuses the primary worktree and launches the workflow.
 7. Follow run, agent, verification, and intervention state.
-8. Resolve an intervention, then request a supported audited control. Exact workflow-call continuation across daemon restarts remains incomplete; use `dk_restart_task` only for an intentional fresh task run.
+8. Resolve an intervention, then request a supported audited control. Across daemon restarts, interrupted runs resume through durable journal replay (completed steps replay, the in-flight step re-runs); exact mid-turn workflow-call continuation remains incomplete. Use `dk_restart_task` only for an intentional fresh task run.
 9. Inspect verdict/evidence and close task work through MCP.

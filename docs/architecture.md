@@ -93,7 +93,7 @@ Implemented persistence boundaries:
 - PR creation is idempotent by branch;
 - PR creation is reused by branch when the lifecycle is deliberately retried.
 
-The stock daemon does not yet reconstruct active scheduler state, ACP checkpoints, in-flight workflow calls, workspaces, verification runs, or post-merge lifecycle steps on startup. Agent/run controls can create an audited replacement session, but its result is not yet reconnected to the original workflow continuation. These are release blockers for crash-safe unattended operation.
+The stock daemon reconstructs scheduler state from persisted runs on startup: runs cut off mid-execution are resumed with their deterministic run ID (so the durable journal replays completed steps), and human-gated runs are re-seeded as paused. It does not yet reconstruct ACP checkpoints, resume the exact in-flight turn, reconcile workspaces/verification runs on startup, or replay post-merge lifecycle steps. Agent/run controls can create an audited replacement session, but its result is reconnected to the workflow continuation at the call boundary (re-execution), not mid-turn. Exact mid-turn reattachment and post-merge reconciliation remain release blockers for fully crash-safe unattended operation.
 
 ## Verification versus capabilities
 

@@ -9,7 +9,7 @@ An intervention is a durable control-plane record representing a reason automati
 3. Configured channels receive a notification with a stable human-friendly `DK-…` code.
 4. The human replies to that exact message, includes its code, or asks a PM client to resolve the record through MCP.
 5. The intervention service performs an idempotent terminal transition and records the action, answer, resolver identity, and timestamps.
-6. The PM/runtime requests a supported audited retry/resume control. Exact continuation of an interrupted workflow call across daemon restarts is not implemented yet.
+6. The PM/runtime requests a supported audited retry/resume control. Across daemon restarts, the interrupted run is resumed through durable journal replay (completed steps are not re-executed, the in-flight step is re-run); exact mid-turn continuation of an interrupted workflow call is not implemented yet.
 
 Channel delivery failure never deletes the intervention or fabricates a response. The operator can always inspect and resolve the durable record through MCP.
 

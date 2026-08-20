@@ -178,4 +178,21 @@ export class RunSupervisor {
   public isActive(taskId: TaskId): boolean {
     return this.activeRuns.has(taskId);
   }
+
+  /**
+   * Re-seed state recovered from the durable store on daemon restart.
+   * `active` prevents the scheduler from double-scheduling a task whose
+   * workflow is being resumed; `paused` keeps a human-gated task out of the
+   * ready set until an explicit retry.
+   */
+  public recoverActive(taskId: TaskId, runId: RunId): void {
+    this.activeRuns.set(taskId, runId);
+    this.completedTasks.delete(taskId);
+  }
+
+  public recoverPaused(taskId: TaskId): void {
+    this.activeRuns.delete(taskId);
+    this.completedTasks.delete(taskId);
+    this.manuallyPaused.add(taskId);
+  }
 }

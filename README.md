@@ -10,7 +10,7 @@ Dark Kitchen is a self-hosted control plane for autonomous software work. It wat
 
 It is deliberately not another coding-agent UI. Trackers, source control, harnesses, messaging channels, PM clients, verification providers, and persistence are replaceable layers.
 
-> **Status:** pre-1.0 and under active development. The deterministic core and adapter boundaries have automated coverage, but the current daemon does not yet reconcile active runs/sessions after a process crash, reconnect replacement agent sessions to an interrupted workflow call, or implement remote execution nodes. Linear/Jira and real provider/channel paths also still require live commissioning. Do not enable unattended merge from this revision.
+> **Status:** pre-1.0 and under active development. The deterministic core and adapter boundaries have automated coverage. On startup the daemon reconciles interrupted runs (resuming them through durable journal replay and preserving human-gated pauses), but it does not yet reattach a replacement agent session to an in-flight workflow turn, reconcile post-merge lifecycle steps, or implement remote execution nodes. Linear/Jira and real provider/channel paths also still require live commissioning. Do not enable unattended merge from this revision.
 
 ![Dark Kitchen architecture: tracker cards enter the control plane, role-specific agents work in isolated worktrees, verified pull requests leave it, and humans answer interventions over messaging](docs/assets/dark-kitchen-architecture.png)
 
@@ -30,7 +30,7 @@ The image was generated for this project. Its reproducible prompt metadata is in
 - Exposes an allowlisted native/custom harness contract for embedding hosts.
 - Runs a bounded implement → independent review → fix → repository-test workflow.
 - Owns branch push, idempotent PR creation, configured CI gates, merge policy, tracker transition, and worktree release.
-- Persists runs, sessions, interventions, verification metadata, and completed workflow-call results for audit and explicit replay; daemon-start reconciliation remains incomplete.
+- Persists runs, sessions, interventions, verification metadata, and completed workflow-call results; on startup it resumes interrupted runs through journal replay and preserves human-gated pauses. Mid-turn session reattachment and post-merge reconciliation remain incomplete.
 - Exposes PM and runtime controls over MCP on local stdio or authenticated HTTP.
 - Sends interventions through direct Telegram, Discord, Slack, iMessage, or WhatsApp transports; an OpenClaw gateway adapter is also available to embedders.
 - Separates verification requirements from machine capabilities and requires approval before managed tools change the host.
@@ -147,11 +147,11 @@ Configuration validates known field types, detects duplicate IDs and dangling re
 5. Implementation is independently reviewed, fixed if needed, and checked by a repository-tester role within bounded loops.
 6. If the task declares verification, the configured profile and capability state determine whether evidence can be produced. Blocking proof must be durable before merge.
 7. Dark Kitchen pushes the branch, creates or reuses one PR, records tests/review/evidence in the PR context, and enforces CI/approval policy.
-8. On the validated happy path, a confirmed merge transitions the tracker task and releases the worktree. Crash recovery and post-merge reconciliation are not yet complete enough for unattended operation.
+8. On the validated happy path, a confirmed merge transitions the tracker task and releases the worktree. Startup crash recovery now resumes interrupted runs through durable journal replay; exact mid-turn session reattachment and post-merge reconciliation are still not complete enough for unattended operation.
 
 ## ChatGPT or another PM client
 
-The PM connects to Dark Kitchen MCP—not directly to the coding-agent terminals. It can inspect the task graph and runtime, create/update tasks, configure roles, approve automation, discuss interventions, and request audited run/session controls after the human answers. A replacement session is currently recorded correctly but is not yet reattached to an already interrupted workflow promise after a daemon/process failure.
+The PM connects to Dark Kitchen MCP—not directly to the coding-agent terminals. It can inspect the task graph and runtime, create/update tasks, configure roles, approve automation, discuss interventions, and request audited run/session controls after the human answers. On restart the interrupted workflow step is re-executed from its durable journal; a replacement session is recorded correctly but is not yet reattached to the exact in-flight turn after a daemon/process failure.
 
 There are two distinct authority boundaries:
 
@@ -197,11 +197,11 @@ OpenClaw remains an optional gateway integration at the channel-package boundary
 
 Workflow code names semantic roles only. The same call graph can route an implementer to Codex, a reviewer to OpenCode, and a fixer to another compatible runtime without importing those providers into the workflow engine.
 
-| Runtime path           | Current contract                                                                                                                                                                                                                            |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ACP/acpx               | Primary daemon integration; runtime sessions expose resume, cancel, live instructions, model selection, and isolated MCP injection. Codex/OpenCode boundaries are covered by compatibility tests; daemon restart restoration is incomplete. |
-| Native/custom plugin   | Public allowlisted plugin contract; shell-free one-shot process adapter available. User-managed profiles must not be mutated. Host composition is required.                                                                                 |
-| DeepSeek Harness (DSH) | Bundled adapter for an explicitly installed supported DSH developer preview. The stock daemon selects `kind: deepseek-harness`; execution is one-shot plus cancellation and preserves DSH config.                                           |
+| Runtime path           | Current contract                                                                                                                                                                                                                                                                                         |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ACP/acpx               | Primary daemon integration; runtime sessions expose resume, cancel, live instructions, model selection, and isolated MCP injection. Codex/OpenCode boundaries are covered by compatibility tests; restart restoration replays completed journal steps but does not yet reattach a live session mid-turn. |
+| Native/custom plugin   | Public allowlisted plugin contract; shell-free one-shot process adapter available. User-managed profiles must not be mutated. Host composition is required.                                                                                                                                              |
+| DeepSeek Harness (DSH) | Bundled adapter for an explicitly installed supported DSH developer preview. The stock daemon selects `kind: deepseek-harness`; execution is one-shot plus cancellation and preserves DSH config.                                                                                                        |
 
 The workflow engine provides phases, parallel branches, pipelines, nested workflows, bounded retries, cancellation, concurrency limits, deterministic call identities, and journal replay. See [workflows](docs/workflows.md) and [harnesses](docs/harnesses.md).
 

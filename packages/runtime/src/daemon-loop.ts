@@ -13,6 +13,7 @@ import type {
   ProjectId,
   RunId,
   InterventionKind,
+  RuntimeStore,
 } from '@dark-kitchen/core';
 import { createRunId } from '@dark-kitchen/core';
 import { randomUUID } from 'node:crypto';
@@ -53,6 +54,8 @@ export interface DaemonDependencies {
   readonly interventionService: InterventionService;
   /** Cleanup boundary invoked only after merge/no-code completion is fully verified. */
   readonly releaseWorktree?: (taskId: TaskId) => Promise<void>;
+  /** Durable store used to reconcile interrupted runs on startup. */
+  readonly store?: RuntimeStore;
 }
 
 export interface WorkflowOutcome {
@@ -114,6 +117,72 @@ export class DaemonLoop {
 
   public isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Reconcile runs persisted by a previous daemon process.
+   *
+   * Crash-safe recovery semantics:
+   * - A run left `running`/`queued`/`starting`/`interrupted` was cut off
+   *   mid-execution and is resumed with the task's deterministic run id, so
+   *   the durable journal replays completed steps and only the in-flight step
+   *   re-executes.
+   * - A run left `waiting`/`blocked` is gated on a human decision and is
+   *   re-seeded as paused instead of being silently re-scheduled.
+   *
+   * Returns counts for observability; failures inside a resumed run surface
+   * as ordinary interventions rather than aborting reconciliation.
+   */
+  public async reconcile(): Promise<{
+    readonly resumed: number;
+    readonly paused: number;
+    readonly skipped: number;
+  }> {
+    if (!this.deps.store) return { resumed: 0, paused: 0, skipped: 0 };
+
+    const runs = await this.deps.store.listRuns();
+    const recoverableStates = new Set([
+      'queued',
+      'starting',
+      'running',
+      'interrupted',
+      'waiting',
+      'blocked',
+    ]);
+    const resumeStates = new Set(['queued', 'starting', 'running', 'interrupted']);
+
+    // A tracker outage must not prevent the daemon from starting. Recovered
+    // runs are retried on the next normal tick once the tracker recovers.
+    let taskById: Map<TaskId, Task>;
+    try {
+      const { tasks } = await this.deps.getTaskGraph();
+      taskById = new Map(tasks.map((t) => [t.id, t]));
+    } catch (err) {
+      process.stderr.write(`[DaemonLoop] reconcile graph error: ${String(err)}\n`);
+      return { resumed: 0, paused: 0, skipped: 0 };
+    }
+
+    let resumed = 0;
+    let paused = 0;
+    let skipped = 0;
+    for (const run of runs) {
+      if (!recoverableStates.has(run.state)) continue;
+      const task = taskById.get(run.taskId);
+      // Task no longer exists or is already done upstream: nothing to resume.
+      if (!task || task.status === 'completed' || task.status === 'cancelled') {
+        skipped++;
+        continue;
+      }
+      if (resumeStates.has(run.state)) {
+        this.deps.supervisor.recoverActive(run.taskId, run.id);
+        void this.runTask(task);
+        resumed++;
+      } else {
+        this.deps.supervisor.recoverPaused(run.taskId);
+        paused++;
+      }
+    }
+    return { resumed, paused, skipped };
   }
 
   private async tick(): Promise<void> {
