@@ -4,7 +4,10 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git openssh-client unzip \
   && rm -rf /var/lib/apt/lists/*
 
-RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
+# The stock corepack in node:22.13 cannot verify pnpm's rotated signing keys;
+# refresh corepack before activating the pinned pnpm version.
+RUN npm install --global corepack@latest \
+  && corepack enable && corepack prepare pnpm@10.14.0 --activate
 
 FROM base AS build
 
