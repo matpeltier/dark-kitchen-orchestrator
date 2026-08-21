@@ -890,14 +890,20 @@ export class DarkKitchenDaemon {
     } catch (error) {
       this.log('warn', `Conflict sync failed for ${String(taskId)}: ${String(error)}`);
     } finally {
-      // The retried run must re-execute agent steps against the synced
-      // worktree, not replay stale completed steps from the durable journal.
-      const taskSlug = String(taskId)
-        .replace(/[^a-zA-Z0-9-]/g, '-')
-        .toLowerCase();
-      const journalPath = join(this.dataDir, `store-journal-run-${taskSlug}.db`);
-      await rm(journalPath, { force: true }).catch(() => {});
+      await this.deleteTaskJournal(taskId);
     }
+  }
+
+  /**
+   * Delete the task's durable workflow journal so the next run re-executes
+   * agent steps instead of replaying results computed before the retry.
+   */
+  private async deleteTaskJournal(taskId: import('@dark-kitchen/core').TaskId): Promise<void> {
+    const taskSlug = String(taskId)
+      .replace(/[^a-zA-Z0-9-]/g, '-')
+      .toLowerCase();
+    const journalPath = join(this.dataDir, `store-journal-run-${taskSlug}.db`);
+    await rm(journalPath, { force: true }).catch(() => {});
   }
 
   private async applyInterventionResolution(input: {
@@ -926,6 +932,10 @@ export class DarkKitchenDaemon {
         // provided guidance, agents see an in-progress merge to complete).
         if (input.kind === 'merge-conflict') {
           await this.syncConflictedWorktree(taskId);
+        } else {
+          // Any human-guided retry must re-execute agent steps against current
+          // reality rather than replay stale completed steps from the journal.
+          await this.deleteTaskJournal(taskId);
         }
         this.supervisor?.retryTask(taskId);
         await this.tracker?.updateTask(taskId, { status: 'ready' });
