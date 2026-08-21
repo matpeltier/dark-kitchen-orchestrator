@@ -2,7 +2,7 @@
 
 Notable user-visible changes to Dark Kitchen are documented here. Tagged GitHub releases also use the repository comparison to generate complete release notes.
 
-## Unreleased
+## 0.2.0 - 2026-08-21
 
 ### Added
 

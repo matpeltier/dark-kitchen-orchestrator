@@ -1,6 +1,6 @@
 {
   "name": "dark-kitchen",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Autonomous coding agent control plane — connects trackers, git, coding agents, and human channels",
   "private": false,
   "type": "module",
