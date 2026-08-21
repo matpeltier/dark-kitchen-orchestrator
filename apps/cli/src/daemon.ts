@@ -889,6 +889,14 @@ export class DarkKitchenDaemon {
       );
     } catch (error) {
       this.log('warn', `Conflict sync failed for ${String(taskId)}: ${String(error)}`);
+    } finally {
+      // The retried run must re-execute agent steps against the synced
+      // worktree, not replay stale completed steps from the durable journal.
+      const taskSlug = String(taskId)
+        .replace(/[^a-zA-Z0-9-]/g, '-')
+        .toLowerCase();
+      const journalPath = join(this.dataDir, `store-journal-run-${taskSlug}.db`);
+      await rm(journalPath, { force: true }).catch(() => {});
     }
   }
 
