@@ -31,6 +31,15 @@
     "dark-kitchen"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matpeltier/dark-kitchen-orchestrator.git",
+    "directory": "apps/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/matpeltier/dark-kitchen-orchestrator/issues"
+  },
+  "homepage": "https://github.com/matpeltier/dark-kitchen-orchestrator#readme",
   "devDependencies": {
     "@dark-kitchen/capabilities": "workspace:*",
     "@dark-kitchen/channels": "workspace:*",
