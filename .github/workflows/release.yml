@@ -179,7 +179,7 @@ jobs:
             test "$published_integrity" = "$local_integrity"
             echo "$package_name@$package_version already exists with the exact tested integrity; skipping duplicate publish"
           else
-            npm publish "$package_tarball" --access public --provenance
+            npm publish "./$package_tarball" --access public --provenance
           fi
 
   publish-container:
