@@ -373,7 +373,15 @@ export const RUNTIME_TOOLS: McpToolDescriptor[] = [
       'Cancel/dismiss an open non-critical intervention while preserving its durable audit record.',
     inputSchema: {
       type: 'object',
-      properties: { interventionId: NON_EMPTY_STRING_SCHEMA },
+      properties: {
+        interventionId: NON_EMPTY_STRING_SCHEMA,
+        resolvedBy: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 500,
+          description: 'Optional human identity recording who cancelled the intervention.',
+        },
+      },
       required: ['interventionId'],
     },
     annotations: { destructiveHint: true, idempotentHint: true },
@@ -1109,8 +1117,12 @@ export async function handleTool(
       case 'dk_dismiss_intervention':
       case 'dk_cancel_intervention': {
         if (!ctx.interventionService) return err('No intervention service configured');
+        const rawResolvedBy = args['resolvedBy'];
         const dismissed = await ctx.interventionService.dismiss(
           createInterventionId(String(args['interventionId'])),
+          typeof rawResolvedBy === 'string' && rawResolvedBy.trim().length > 0
+            ? { resolvedBy: rawResolvedBy }
+            : undefined,
         );
         return ok(dismissed);
       }

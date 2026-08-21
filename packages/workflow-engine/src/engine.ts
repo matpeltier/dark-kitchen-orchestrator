@@ -33,12 +33,37 @@ export class WorkflowCancelledError extends Error {
 export class WorkflowAgentError extends Error {
   public readonly role: string;
   public readonly callKey: string;
-  public constructor(message: string, role: string, callKey: string) {
+  /** Structured classification from the underlying harness error, if any. */
+  public readonly failureKind?: FailureKind;
+  public constructor(message: string, role: string, callKey: string, failureKind?: FailureKind) {
     super(message);
     this.name = 'WorkflowAgentError';
     this.role = role;
     this.callKey = callKey;
+    if (failureKind !== undefined) this.failureKind = failureKind;
   }
+}
+
+/** Structured failure classification, mirroring @dark-kitchen/core's kind. */
+export type FailureKind = 'auth' | 'quota' | 'rate-limit' | 'merge-conflict' | 'agent-failure';
+
+/**
+ * Extract a structured failure kind from an underlying error without coupling
+ * the engine to concrete harness error classes: harnesses expose their
+ * classification as a `kind` string property (e.g. AcpClassifiedError).
+ */
+export function extractFailureKind(error: unknown): FailureKind | undefined {
+  const kind = (error as { kind?: unknown } | null)?.kind;
+  if (
+    kind === 'auth' ||
+    kind === 'quota' ||
+    kind === 'rate-limit' ||
+    kind === 'merge-conflict' ||
+    kind === 'agent-failure'
+  ) {
+    return kind;
+  }
+  return undefined;
 }
 
 export class MissingRoleError extends Error {
@@ -319,6 +344,7 @@ export class WorkflowBuilder {
               `Agent role "${options.role}" failed: ${String(err)}`,
               options.role,
               callKey,
+              extractFailureKind(err),
             );
           } finally {
             release();

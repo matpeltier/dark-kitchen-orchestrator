@@ -205,6 +205,20 @@ async function cmdInit(): Promise<void> {
       '    roles: [implementer, reviewer, fixer, repository-tester]',
     ].join('\n');
     await writeFile(configPath, template + '\n', 'utf8');
+
+    const gitignorePath = join(projectRoot, '.gitignore');
+    let gitignore = '';
+    try {
+      gitignore = await readFile(gitignorePath, 'utf8');
+    } catch {
+      // No existing .gitignore — start fresh.
+    }
+    const runtimeIgnore = '.dark-kitchen/runtime/';
+    if (!gitignore.split('\n').some((line) => line.trim() === runtimeIgnore)) {
+      const separator = gitignore.length > 0 && !gitignore.endsWith('\n') ? '\n' : '';
+      await writeFile(gitignorePath, `${gitignore}${separator}${runtimeIgnore}\n`, 'utf8');
+      print('Added .dark-kitchen/runtime/ to .gitignore.');
+    }
     print('Created .dark-kitchen/config.yaml — edit YOUR_ORG and YOUR_REPO.');
     print('For interactive setup, run: dk setup');
   }

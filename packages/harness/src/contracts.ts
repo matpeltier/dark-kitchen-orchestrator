@@ -22,6 +22,8 @@ export interface ManagedHarnessProfile {
   readonly skills?: readonly string[];
   readonly mcpServers?: readonly string[];
   readonly plugins?: readonly string[];
+  /** Alternative models on the same harness kind, tried in order on quota exhaustion. */
+  readonly fallbackModels?: readonly string[];
 }
 
 export interface UserManagedHarnessProfile {

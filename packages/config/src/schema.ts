@@ -91,6 +91,8 @@ export const ManagedHarnessProfileSchema = z.object({
   skills: z.array(nonEmptyString).optional(),
   mcpServers: z.array(nonEmptyString).optional(),
   plugins: z.array(nonEmptyString).optional(),
+  /** Alternative models on the same harness kind, tried in order on quota exhaustion. */
+  fallbackModels: z.array(nonEmptyString).optional(),
 });
 
 export const CustomHarnessProfileSchema = z.object({
@@ -121,6 +123,8 @@ export const RoleConfigSchema = z.object({
   id: nonEmptyString,
   harnessProfileId: nonEmptyString,
   overrides: HarnessOverridesSchema.optional(),
+  /** Alternative harnessProfile ids, tried in order when the primary hits a quota error. */
+  fallbacks: z.array(nonEmptyString).optional(),
 });
 export type RoleConfig = z.infer<typeof RoleConfigSchema>;
 
@@ -241,6 +245,17 @@ export const ConcurrencyConfigSchema = z.object({
 });
 export type ConcurrencyConfig = z.infer<typeof ConcurrencyConfigSchema>;
 
+// ─── Scheduler ───────────────────────────────────────────────────────────────
+
+export const SchedulerConfigSchema = z.object({
+  /**
+   * Promote backlog tasks whose dependencies are all completed to 'ready'
+   * (with dk:ready label sync) during each scheduling tick.
+   */
+  autoPromoteDependents: z.boolean().default(true),
+});
+export type SchedulerConfig = z.infer<typeof SchedulerConfigSchema>;
+
 // ─── Intervention policy ──────────────────────────────────────────────────────
 
 export const InterventionPolicySchema = z.object({
@@ -268,6 +283,7 @@ export const DarkKitchenConfigSchema = z.object({
   trackers: z.array(TrackerConfigSchema).optional(),
   repositories: z.array(ScmRepositoryConfigSchema).optional(),
   concurrency: ConcurrencyConfigSchema.optional(),
+  scheduler: SchedulerConfigSchema.optional(),
   workflows: z.array(WorkflowConfigSchema).optional(),
   roles: z.array(RoleConfigSchema).optional(),
   harnessProfiles: z.array(HarnessProfileSchema).optional(),

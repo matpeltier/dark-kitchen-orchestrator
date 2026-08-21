@@ -95,6 +95,20 @@ function validateReferences(config: DarkKitchenConfig): string[] {
         `Role "${role.id}" references unknown harnessProfileId "${role.harnessProfileId}"`,
       );
     }
+    // Fallbacks must reference existing, distinct harness profiles
+    const seenFallbacks = new Set<string>();
+    for (const fallbackId of role.fallbacks ?? []) {
+      if (!harnessProfileIds.has(fallbackId)) {
+        errors.push(`Role "${role.id}" references unknown fallback harnessProfile "${fallbackId}"`);
+      }
+      if (fallbackId === role.harnessProfileId) {
+        errors.push(`Role "${role.id}" lists its own harnessProfile "${fallbackId}" as a fallback`);
+      }
+      if (seenFallbacks.has(fallbackId)) {
+        errors.push(`Role "${role.id}" lists fallback harnessProfile "${fallbackId}" twice`);
+      }
+      seenFallbacks.add(fallbackId);
+    }
     // Overrides are only meaningful for managed harness profiles
     if (role.overrides) {
       const hp = (config.harnessProfiles ?? []).find((h) => h.id === role.harnessProfileId);

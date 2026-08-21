@@ -2,6 +2,23 @@
 
 Notable user-visible changes to Dark Kitchen are documented here. Tagged GitHub releases also use the repository comparison to generate complete release notes.
 
+## Unreleased
+
+### Added
+
+- Harness fallback chains: roles accept `fallbacks` (alternative harness profiles) and managed profiles accept `fallbackModels` (alternative models). On a quota-classified error the runtime transparently switches to the next candidate and restarts the pending turn there; exhaustion of every candidate raises the quota failure as before.
+- Structured failure classification: harness errors carry their nature (`quota`, `auth`, `rate-limit`) through the workflow engine into intervention kinds — no more keyword parsing of summaries.
+- Automatic promotion of dependents: backlog tasks whose dependencies are all completed are promoted to `ready` (with `dk:ready` tracker sync) during each scheduling tick. Disable with `scheduler.autoPromoteDependents: false`.
+- PR lifecycle re-evaluation: after a checks failure or merge refusal, the lifecycle re-polls a bounded number of times so externally fixed branches merge without an intervention resolution.
+- Automatic base-branch merge: on a merge conflict refusal, the task worktree merges the base branch and pushes when trivial; unresolvable conflicts raise a dedicated `merge-conflict` intervention kind.
+
+### Fixed
+
+- Parallel cold starts no longer race on npm's shared npx cache (spawns of the same binary are serialized until warm).
+- Channel interventions are coalesced: repeated incidents of the same kind on the same target no longer pile up duplicate open records, while keyed replays stay idempotent and never resurrect terminal records.
+- `dk_cancel_intervention` accepts an optional `resolvedBy` for audit parity with resolve.
+- `dk init` adds `.dark-kitchen/runtime/` to `.gitignore` so runtime state and worktrees are never committed by accident.
+
 ## 0.2.0 - 2026-08-21
 
 ### Added

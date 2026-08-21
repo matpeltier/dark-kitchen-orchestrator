@@ -5,3 +5,4 @@ export * from './fake-harness.js';
 export * from './native-adapter.js';
 export * from './acp-adapter.js';
 export * from './acp-runtime-adapter.js';
+export * from './failover-runtime.js';

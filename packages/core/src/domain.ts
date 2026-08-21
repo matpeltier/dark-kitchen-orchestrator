@@ -182,9 +182,19 @@ export type InterventionKind =
   | 'quota'
   | 'rate-limit'
   | 'agent-failure'
+  | 'merge-conflict'
   | 'stuck-agent'
   | 'manual-intervention';
 export type InterventionStatus = 'open' | 'acknowledged' | 'resolved' | 'dismissed';
+
+/**
+ * Structured failure classification carried by errors and outcomes so
+ * interventions never depend on parsing human-readable summaries.
+ */
+export type FailureKind = Extract<
+  InterventionKind,
+  'auth' | 'quota' | 'rate-limit' | 'merge-conflict' | 'agent-failure'
+>;
 
 export type Intervention = InterventionTarget & {
   readonly id: InterventionId;

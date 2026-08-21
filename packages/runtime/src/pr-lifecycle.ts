@@ -8,6 +8,7 @@
 import type { PullRequestId, RepositoryId, TaskId } from '@dark-kitchen/core';
 import type { FullScmAdapter, MergePullRequestInput } from '@dark-kitchen/scm';
 import type { FullTrackerAdapter } from '@dark-kitchen/tracker';
+import { mergeBaseIntoBranch } from './workflow-executor.js';
 
 export interface WorkflowResult {
   readonly taskId: TaskId;
@@ -46,6 +47,16 @@ export interface PrLifecycleOptions {
   readonly checkPollIntervalMs?: number;
   readonly checkTimeoutMs?: number;
   readonly deleteHeadBranchAfterMerge?: boolean;
+  /** Task worktree path; enables automatic base-branch merges on conflicts. */
+  readonly worktreePath?: string;
+  readonly pushRemote?: string;
+  readonly pushToken?: string;
+  /**
+   * Bounded number of re-evaluations when checks fail or the merge is
+   * refused: covers externally fixed branches (manual push, CI rerun)
+   * without requiring an intervention resolution.
+   */
+  readonly externalFixPolls?: number;
 }
 
 export interface PrLifecycleResult {
@@ -58,6 +69,7 @@ export interface PrLifecycleResult {
     | 'checks-failed'
     | 'pr-failed'
     | 'merge-refused'
+    | 'merge-conflict'
     | 'merged'
     | 'tracker-close-failed'
     | 'verification-failed'
@@ -297,88 +309,142 @@ export class PrLifecycleOrchestrator {
 
     let mergedPr = pr;
     if (pr.status !== 'merged') {
-      // Poll checks. Network/timeouts become recoverable lifecycle state rather
-      // than escaping and losing the run's PR/evidence context.
-      let checks;
-      try {
-        checks = await this.scm.pollChecks(pr.id, {
-          intervalMs: options.checkPollIntervalMs ?? 30_000,
-          timeoutMs: options.checkTimeoutMs ?? 600_000,
-          ...(options.requiredChecks ? { requiredChecks: options.requiredChecks } : {}),
+      // Bounded re-evaluation loop: covers externally fixed branches (manual
+      // push, CI rerun) and automatic base-branch merges, so a transient
+      // checks/conflict refusal does not require an intervention resolution.
+      const maxAttempts = Math.max(1, options.externalFixPolls ?? 3);
+      let lastHeadSha: string | undefined;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        // Poll checks. Network/timeouts become recoverable lifecycle state
+        // rather than escaping and losing the run's PR/evidence context.
+        let checks;
+        try {
+          checks = await this.scm.pollChecks(pr.id, {
+            intervalMs: options.checkPollIntervalMs ?? 30_000,
+            timeoutMs: options.checkTimeoutMs ?? 600_000,
+            ...(options.requiredChecks ? { requiredChecks: options.requiredChecks } : {}),
+          });
+        } catch (error) {
+          return {
+            pullRequestId: pr.id,
+            merged: false,
+            trackerClosed: false,
+            worktreeReleased: false,
+            state: 'checks-failed',
+            errorMessage: `Could not poll SCM checks: ${safeErrorMessage(error)}`,
+          };
+        }
+
+        const failedChecks = (options.requiredChecks ?? []).filter((req) => {
+          const check = checks.find((c) => c.name === req);
+          return !check || check.status !== 'passed';
         });
-      } catch (error) {
-        return {
-          pullRequestId: pr.id,
-          merged: false,
-          trackerClosed: false,
-          worktreeReleased: false,
-          state: 'checks-failed',
-          errorMessage: `Could not poll SCM checks: ${safeErrorMessage(error)}`,
-        };
-      }
 
-      const failedChecks = (options.requiredChecks ?? []).filter((req) => {
-        const check = checks.find((c) => c.name === req);
-        return !check || check.status !== 'passed';
-      });
+        if (failedChecks.length > 0) {
+          // The branch may have been fixed externally since the failure: wait
+          // briefly and re-evaluate only when the head actually moved.
+          const head = await this.scm
+            .getPullRequest(options.repositoryId, pr.id)
+            .then((candidate) => candidate.headSha)
+            .catch(() => undefined);
+          if (attempt < maxAttempts - 1 && head !== undefined && head !== lastHeadSha) {
+            lastHeadSha = head;
+            continue;
+          }
+          return {
+            pullRequestId: pr.id,
+            merged: false,
+            trackerClosed: false,
+            worktreeReleased: false,
+            state: 'checks-failed',
+            errorMessage: `Required checks failed: ${failedChecks.join(', ')}`,
+          };
+        }
+        lastHeadSha = undefined;
 
-      if (failedChecks.length > 0) {
-        return {
-          pullRequestId: pr.id,
-          merged: false,
-          trackerClosed: false,
-          worktreeReleased: false,
-          state: 'checks-failed',
-          errorMessage: `Required checks failed: ${failedChecks.join(', ')}`,
-        };
-      }
+        // Refresh the PR after checks and bind the merge to its exact head. A
+        // force-push between proof and merge must fail rather than merge untested code.
+        let mergeHeadSha: string | undefined;
+        try {
+          mergeHeadSha = (await this.scm.getPullRequest(options.repositoryId, pr.id)).headSha;
+        } catch (error) {
+          return {
+            pullRequestId: pr.id,
+            merged: false,
+            trackerClosed: false,
+            worktreeReleased: false,
+            state: 'merge-refused',
+            errorMessage: `Could not refresh PR head before merge: ${safeErrorMessage(error)}`,
+          };
+        }
+        if (!mergeHeadSha) {
+          return {
+            pullRequestId: pr.id,
+            merged: false,
+            trackerClosed: false,
+            worktreeReleased: false,
+            state: 'merge-refused',
+            errorMessage: 'SCM did not provide a PR head SHA for compare-and-merge protection',
+          };
+        }
 
-      // Refresh the PR after checks and bind the merge to its exact head. A
-      // force-push between proof and merge must fail rather than merge untested code.
-      let mergeHeadSha: string | undefined;
-      try {
-        mergeHeadSha = (await this.scm.getPullRequest(options.repositoryId, pr.id)).headSha;
-      } catch (error) {
-        return {
+        // Merge
+        const mergeInput: MergePullRequestInput = {
           pullRequestId: pr.id,
-          merged: false,
-          trackerClosed: false,
-          worktreeReleased: false,
-          state: 'merge-refused',
-          errorMessage: `Could not refresh PR head before merge: ${safeErrorMessage(error)}`,
+          repositoryId: options.repositoryId,
+          strategy: options.mergeStrategy ?? 'squash',
+          expectedHeadSha: mergeHeadSha,
+          ...(options.requiredChecks ? { requiredChecks: options.requiredChecks } : {}),
         };
-      }
-      if (!mergeHeadSha) {
-        return {
-          pullRequestId: pr.id,
-          merged: false,
-          trackerClosed: false,
-          worktreeReleased: false,
-          state: 'merge-refused',
-          errorMessage: 'SCM did not provide a PR head SHA for compare-and-merge protection',
-        };
-      }
 
-      // Merge
-      const mergeInput: MergePullRequestInput = {
-        pullRequestId: pr.id,
-        repositoryId: options.repositoryId,
-        strategy: options.mergeStrategy ?? 'squash',
-        expectedHeadSha: mergeHeadSha,
-        ...(options.requiredChecks ? { requiredChecks: options.requiredChecks } : {}),
-      };
-
-      try {
-        mergedPr = await this.scm.merge(mergeInput);
-      } catch (err) {
-        return {
-          pullRequestId: pr.id,
-          merged: false,
-          trackerClosed: false,
-          worktreeReleased: false,
-          state: 'merge-refused',
-          errorMessage: safeErrorMessage(err),
-        };
+        try {
+          mergedPr = await this.scm.merge(mergeInput);
+          break;
+        } catch (err) {
+          const message = safeErrorMessage(err);
+          if (/conflict/i.test(message)) {
+            // With worktree access, attempt a bounded automatic base-branch
+            // merge in the task worktree; a trivial merge is pushed and the
+            // cycle re-runs.
+            if (options.worktreePath && attempt < maxAttempts - 1) {
+              const outcome = await mergeBaseIntoBranch(
+                options.worktreePath,
+                options.pushRemote ?? 'origin',
+                options.targetBranch,
+                options.sourceBranch,
+                options.pushToken,
+              );
+              if (outcome === 'merged') continue;
+              return {
+                pullRequestId: pr.id,
+                merged: false,
+                trackerClosed: false,
+                worktreeReleased: false,
+                state: 'merge-conflict',
+                errorMessage:
+                  outcome === 'conflict'
+                    ? `Merge conflict with ${options.targetBranch} could not be resolved automatically`
+                    : message,
+              };
+            }
+            return {
+              pullRequestId: pr.id,
+              merged: false,
+              trackerClosed: false,
+              worktreeReleased: false,
+              state: 'merge-conflict',
+              errorMessage: message,
+            };
+          }
+          return {
+            pullRequestId: pr.id,
+            merged: false,
+            trackerClosed: false,
+            worktreeReleased: false,
+            state: 'merge-refused',
+            errorMessage: message,
+          };
+        }
       }
     }
 

@@ -12,23 +12,13 @@ import type {
   TaskId,
   ProjectId,
   RunId,
-  InterventionKind,
   RuntimeStore,
 } from '@dark-kitchen/core';
 import { createRunId } from '@dark-kitchen/core';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
+import { WorkflowAgentError } from '@dark-kitchen/workflow-engine';
 
-function classifyInterventionKind(summary: string): InterventionKind {
-  const lower = summary.toLowerCase();
-  if (lower.includes('auth') || lower.includes('unauthorized') || lower.includes('api key'))
-    return 'auth';
-  if (lower.includes('quota') || lower.includes('credit') || lower.includes('billing'))
-    return 'quota';
-  if (lower.includes('rate') || lower.includes('429') || lower.includes('too many'))
-    return 'rate-limit';
-  return 'agent-failure';
-}
 import type { RunSupervisor } from './scheduler.js';
 import type { InterventionService } from './interventions.js';
 import type { PrLifecycleOrchestrator } from './pr-lifecycle.js';
@@ -63,6 +53,8 @@ export interface WorkflowOutcome {
   readonly summary: string;
   readonly commits: readonly string[];
   readonly sourceBranch: string;
+  /** Absolute path of the task worktree the outcome was produced in. */
+  readonly worktreePath?: string;
   readonly repositoryTestsPassed: boolean;
   readonly reviewPassed: boolean;
   readonly worktreeClean?: boolean;
@@ -73,6 +65,8 @@ export interface WorkflowOutcome {
   readonly verificationResults?: readonly VerificationProof[];
   readonly requiredVerificationProfiles?: readonly string[];
   readonly noCodeOutcome?: boolean;
+  /** Structured failure classification for unsuccessful outcomes. */
+  readonly failureKind?: import('@dark-kitchen/core').FailureKind;
   /** Journal file path, deleted once the task completes (enables fresh re-runs). */
   readonly journalPath?: string;
 }
@@ -220,12 +214,10 @@ export class DaemonLoop {
       const outcome = await this.deps.runWorkflowForTask(task, runId);
 
       if (!outcome.success) {
-        // Classify the failure kind from the error summary
-        const kind = classifyInterventionKind(outcome.summary);
         await this.deps.interventionService.create({
           scope: 'task',
           targetId: taskId,
-          kind,
+          kind: outcome.failureKind ?? 'agent-failure',
           summary: `Workflow failed for task ${taskId}: ${outcome.summary}`,
           deduplicationKey: `workflow-failure:${taskId}:${executionId}`,
         });
@@ -261,6 +253,7 @@ export class DaemonLoop {
           sourceBranch: outcome.sourceBranch,
           targetBranch: this.config.targetBranch ?? 'main',
           autoMerge: this.config.autoMerge ?? false,
+          ...(outcome.worktreePath ? { worktreePath: outcome.worktreePath } : {}),
           ...(this.config.requiredChecks ? { requiredChecks: this.config.requiredChecks } : {}),
           ...(this.config.deleteHeadBranchAfterMerge !== undefined
             ? { deleteHeadBranchAfterMerge: this.config.deleteHeadBranchAfterMerge }
@@ -287,7 +280,7 @@ export class DaemonLoop {
         await this.deps.interventionService.create({
           scope: 'task',
           targetId: taskId,
-          kind: 'agent-failure',
+          kind: lifecycleResult.state === 'merge-conflict' ? 'merge-conflict' : 'agent-failure',
           summary: `PR lifecycle failed (${lifecycleResult.state}): ${lifecycleResult.errorMessage ?? 'unknown'}`,
           deduplicationKey: `lifecycle-failure:${taskId}:${executionId}`,
         });
@@ -306,7 +299,10 @@ export class DaemonLoop {
       await this.deps.interventionService.create({
         scope: 'task',
         targetId: taskId,
-        kind: 'agent-failure',
+        kind:
+          err instanceof WorkflowAgentError && err.failureKind !== undefined
+            ? err.failureKind
+            : 'agent-failure',
         summary: `Unexpected error for task ${taskId}: ${String(err)}`,
         deduplicationKey: `error:${taskId}:${executionId}`,
       });

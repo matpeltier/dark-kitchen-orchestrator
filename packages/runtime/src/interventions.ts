@@ -110,21 +110,36 @@ export class InterventionService {
 
   private async createOnce(input: CreateInterventionInput): Promise<Intervention> {
     // A deterministic ID makes a deduplicated create idempotent across daemon
-    // restarts, not merely while this service instance remains in memory.
+    // restarts: a replay of an already-known deduplication key always returns
+    // the original record, whatever its status (never resurrects it).
     if (input.deduplicationKey) {
       const existingId =
         this.activeByKey.get(input.deduplicationKey) ??
         interventionIdForKey(input.deduplicationKey);
       const existing = await this.store.getIntervention(existingId);
-      // Replays after a terminal transition return the original terminal
-      // record. A new incident must use a new deduplication key.
       if (existing) return existing;
     }
 
+    // Coalesce with an already-active intervention of the same nature on the
+    // same target: near-identical incidents (slightly different summaries)
+    // must not pile up duplicate open records.
+    const all = await this.store.listInterventions();
+    const activeSame = all.find(
+      (candidate) =>
+        (candidate.status === 'open' || candidate.status === 'acknowledged') &&
+        candidate.kind === input.kind &&
+        candidate.scope === input.scope &&
+        candidate.targetId === input.targetId,
+    );
+    if (activeSame) return activeSame;
+
     const now = new Date().toISOString();
-    const id = input.deduplicationKey
-      ? interventionIdForKey(input.deduplicationKey)
-      : createInterventionId(`int-${randomUUID()}`);
+    let id = createInterventionId(`int-${randomUUID()}`);
+    if (input.deduplicationKey) {
+      // Keyed creates use the deterministic id so future replays resolve to
+      // this exact record across daemon restarts.
+      id = interventionIdForKey(input.deduplicationKey);
+    }
 
     let intervention: Intervention;
     const base = {
@@ -211,7 +226,10 @@ export class InterventionService {
     });
   }
 
-  public async dismiss(interventionId: InterventionId): Promise<Intervention> {
+  public async dismiss(
+    interventionId: InterventionId,
+    options?: { readonly resolvedBy?: string },
+  ): Promise<Intervention> {
     return this.runTransition(interventionId, async () => {
       const intervention = await this.store.getIntervention(interventionId);
       if (!intervention) throw new Error(`Intervention ${interventionId} not found`);
@@ -219,11 +237,16 @@ export class InterventionService {
         return intervention;
       }
       const now = new Date().toISOString();
+      const safeResolver = options?.resolvedBy ? redactSensitive(options.resolvedBy) : undefined;
+      const details = safeResolver
+        ? `${intervention.details ?? ''}\nDismissed by ${safeResolver}`.trim()
+        : intervention.details;
       const dismissed: Intervention = {
         ...intervention,
         status: 'dismissed',
         updatedAt: now,
         resolvedAt: now,
+        ...(details !== undefined ? { details } : {}),
       };
       await this.store.saveIntervention(dismissed);
 

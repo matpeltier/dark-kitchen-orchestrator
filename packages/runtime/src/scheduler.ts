@@ -11,6 +11,20 @@ import { validateTaskGraph, createTaskGraphId, DomainValidationError } from '@da
 export interface SchedulerConfig {
   readonly maxParallelTasks: number;
   readonly projectId: ProjectId;
+  /**
+   * Automatically promote backlog tasks whose dependencies are all completed
+   * to 'ready' during each tick. Defaults to true.
+   */
+  readonly autoPromoteDependents?: boolean;
+}
+
+/** Optional collaborators injected into the supervisor. */
+export interface RunSupervisorDeps {
+  /**
+   * Sync a task to 'ready' in the tracker (status flip + dk:ready label).
+   * Called at most once per task per tick when auto-promotion fires.
+   */
+  readonly promoteToReady?: (taskId: TaskId) => Promise<void>;
 }
 
 export interface ScheduledRun {
@@ -82,27 +96,34 @@ export function computeReadyTasks(
 export class RunSupervisor {
   private readonly config: SchedulerConfig;
   private readonly launcher: RunLauncher;
+  private readonly deps: RunSupervisorDeps;
   private readonly activeRuns = new Map<TaskId, RunId>();
   private readonly completedTasks = new Set<TaskId>();
   private readonly manuallyPaused = new Set<TaskId>();
   private running = false;
   private abortController = new AbortController();
 
-  public constructor(config: SchedulerConfig, launcher: RunLauncher) {
+  public constructor(config: SchedulerConfig, launcher: RunLauncher, deps?: RunSupervisorDeps) {
     this.config = config;
     this.launcher = launcher;
+    this.deps = deps ?? {};
   }
 
   /**
    * Execute one scheduling tick: compute ready tasks and launch up to the
-   * concurrency limit. Returns the IDs of newly launched tasks.
+   * concurrency limit. When `autoPromoteDependents` is enabled (default),
+   * backlog tasks whose dependencies are all completed are promoted to
+   * 'ready' first (with tracker sync via `promoteToReady` when provided).
+   * Returns the IDs of newly launched tasks.
    */
   public async tick(
     tasks: readonly Task[],
     dependencies: readonly TaskDependency[],
   ): Promise<readonly TaskId[]> {
     const activeTasks = new Set([...this.activeRuns.keys()]);
-    const readyTasks = computeReadyTasks(tasks, dependencies, activeTasks);
+    const { effectiveTasks } = await this.promoteDependents(tasks, dependencies);
+
+    const readyTasks = computeReadyTasks(effectiveTasks, dependencies, activeTasks);
 
     const available = this.config.maxParallelTasks - this.activeRuns.size;
     const toSchedule = readyTasks
@@ -118,6 +139,58 @@ export class RunSupervisor {
       launched.push(task.id);
     }
     return launched;
+  }
+
+  /**
+   * Promote backlog tasks whose dependencies are all completed to 'ready'.
+   * Returns the effective task list (with promotions applied in memory) and
+   * the set of promoted task IDs. Tracker sync happens via the optional
+   * `promoteToReady` dependency; a sync failure must not abort the tick.
+   */
+  private async promoteDependents(
+    tasks: readonly Task[],
+    dependencies: readonly TaskDependency[],
+  ): Promise<{ effectiveTasks: readonly Task[]; promoted: ReadonlySet<TaskId> }> {
+    if (this.config.autoPromoteDependents === false) {
+      return { effectiveTasks: tasks, promoted: new Set() };
+    }
+
+    const completedTaskIds = new Set(
+      tasks.filter((t) => t.status === 'completed').map((t) => t.id),
+    );
+    const blockedBy = new Map<TaskId, Set<TaskId>>();
+    for (const dep of dependencies) {
+      if (dep.kind !== 'blocks') continue;
+      if (!blockedBy.has(dep.taskId)) blockedBy.set(dep.taskId, new Set());
+      blockedBy.get(dep.taskId)!.add(dep.dependsOnTaskId);
+    }
+
+    const promotable = tasks.filter((task) => {
+      if (task.status !== 'backlog') return false;
+      if (this.activeRuns.has(task.id)) return false;
+      if (this.completedTasks.has(task.id)) return false;
+      const blockers = blockedBy.get(task.id) ?? new Set();
+      return [...blockers].every((blockerId) => completedTaskIds.has(blockerId));
+    });
+
+    if (promotable.length === 0) return { effectiveTasks: tasks, promoted: new Set() };
+
+    const promoted = new Set<TaskId>();
+    for (const task of promotable) {
+      try {
+        await this.deps.promoteToReady?.(task.id);
+        promoted.add(task.id);
+      } catch (err) {
+        process.stderr.write(
+          `[RunSupervisor] auto-promote sync failed for ${task.id}: ${String(err)}\n`,
+        );
+      }
+    }
+
+    const effectiveTasks = tasks.map((task) =>
+      promoted.has(task.id) ? { ...task, status: 'ready' as const } : task,
+    );
+    return { effectiveTasks, promoted };
   }
 
   /** Mark a task run as completed (removes from active set). */

@@ -371,9 +371,19 @@ export class DarkKitchenDaemon {
       {
         maxParallelTasks: this.config?.concurrency?.maxParallelTasks ?? 4,
         projectId,
+        ...(this.config?.scheduler?.autoPromoteDependents !== undefined
+          ? { autoPromoteDependents: this.config.scheduler.autoPromoteDependents }
+          : {}),
       },
       async (taskId: import('@dark-kitchen/core').TaskId) => {
         return `run-${taskId}-${Date.now()}` as import('@dark-kitchen/core').RunId;
+      },
+      {
+        promoteToReady: async (taskId: import('@dark-kitchen/core').TaskId) => {
+          if (!tracker) return;
+          await tracker.setAutonomousApproval(taskId, true);
+          this.log('info', `Auto-promoted dependent task ${String(taskId)} to ready`);
+        },
       },
     );
     this.supervisor = supervisor;
@@ -1091,9 +1101,8 @@ export class DarkKitchenDaemon {
     _harnessProfile: NonNullable<DarkKitchenConfig['harnessProfiles']>[number] | undefined,
   ): Promise<import('@dark-kitchen/workflow-engine').RoleResolver> {
     void _harnessProfile;
-    const { AcpxRuntimeAdapter, RoleRouter, UnsupportedCapabilityError } = await import(
-      '@dark-kitchen/harness'
-    );
+    const { AcpxRuntimeAdapter, RoleRouter, UnsupportedCapabilityError, FailoverHarnessRuntime } =
+      await import('@dark-kitchen/harness');
 
     const allProfiles = this.config?.harnessProfiles ?? [];
     const allRoles = this.config?.roles ?? [];
@@ -1244,11 +1253,16 @@ export class DarkKitchenDaemon {
         signal: AbortSignal,
       ) => {
         if (signal.aborted) throw new Error('cancelled');
-        const runtime = resolved.runtime;
         const managedProfile = resolved.profile.managed ? resolved.profile : undefined;
         const instructions = resolved.instructionsOverride ?? managedProfile?.instructions;
         const model = resolved.modelOverride ?? managedProfile?.model;
         const reasoning = resolved.reasoningOverride ?? managedProfile?.reasoning;
+        const runtime = this.buildFailoverRuntime(
+          resolved.roleId,
+          resolved,
+          model,
+          FailoverHarnessRuntime,
+        );
         const resources = {
           skills: [
             ...new Set([
@@ -1400,6 +1414,62 @@ export class DarkKitchenDaemon {
         });
       };
     };
+  }
+
+  /**
+   * Wrap the role's runtime in a quota-aware failover chain:
+   * [primary profile/model, ...profile fallbackModels, ...role fallbacks].
+   * Returns the raw runtime when no fallback is configured.
+   */
+  private buildFailoverRuntime(
+    roleId: string,
+    resolved: import('@dark-kitchen/harness').ResolvedRole,
+    primaryModel: string | undefined,
+    failoverFactory: typeof import('@dark-kitchen/harness').FailoverHarnessRuntime,
+  ): import('@dark-kitchen/harness').HarnessRuntime {
+    const candidates: import('@dark-kitchen/harness').FailoverCandidate[] = [
+      {
+        profile: resolved.profile,
+        runtime: resolved.runtime,
+        ...(primaryModel !== undefined ? { model: primaryModel } : {}),
+      },
+    ];
+    if (resolved.profile.managed) {
+      for (const fallbackModel of resolved.profile.fallbackModels ?? []) {
+        if (fallbackModel === primaryModel) continue;
+        candidates.push({
+          profile: resolved.profile,
+          model: fallbackModel,
+          runtime: resolved.runtime,
+        });
+      }
+    }
+    const role = (this.config?.roles ?? []).find((entry) => entry.id === roleId);
+    for (const profileId of role?.fallbacks ?? []) {
+      if (profileId === resolved.profile.id) continue;
+      const fallbackProfile = (this.config?.harnessProfiles ?? []).find(
+        (entry) => entry.id === profileId,
+      );
+      if (!fallbackProfile) continue;
+      const runtime = this.runtimeAdapters.get(fallbackProfile.kind);
+      if (!runtime) continue;
+      const model = fallbackProfile.managed ? fallbackProfile.model : undefined;
+      candidates.push({
+        profile: fallbackProfile as import('@dark-kitchen/harness').HarnessProfile,
+        runtime,
+        ...(model !== undefined ? { model } : {}),
+      });
+    }
+    if (candidates.length === 1) return resolved.runtime;
+    return new failoverFactory({
+      id: `failover:${roleId}`,
+      candidates,
+      onSwitch: (event) => {
+        const from = `${event.fromProfileId}${event.fromModel ? `@${event.fromModel}` : ''}`;
+        const to = `${event.toProfileId}${event.toModel ? `@${event.toModel}` : ''}`;
+        this.log('warn', `Quota failover [${roleId}]: ${from} → ${to} (${event.reason})`);
+      },
+    });
   }
 
   // ─── Utilities ─────────────────────────────────────────────────────────────

@@ -232,6 +232,7 @@ export async function executeWorkflow(
       summary: result.summary,
       commits,
       sourceBranch,
+      worktreePath: workspace.path,
       repositoryTestsPassed: result.repositoryTestsPassed,
       reviewPassed: result.reviewPassed,
       worktreeClean,
@@ -376,6 +377,69 @@ async function getCurrentBranch(worktreePath: string): Promise<string> {
     return (await gitExec(worktreePath, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
   } catch {
     return 'unknown';
+  }
+}
+
+/** Result of a bounded automatic base-branch merge into the task branch. */
+export type BaseMergeOutcome = 'merged' | 'conflict' | 'error';
+
+interface GitCommandResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+async function gitExecRaw(
+  cwd: string,
+  args: readonly string[],
+  environment?: Readonly<NodeJS.ProcessEnv>,
+): Promise<GitCommandResult> {
+  const result = await executeProcess({
+    definition: defineProcess({
+      executable: 'git',
+      args: args.map(controlArgument),
+      label: 'git-lifecycle',
+    }),
+    cwd,
+    ...(environment ? { environment } : {}),
+  });
+  return {
+    exitCode: result.exitCode ?? -1,
+    stdout: Buffer.from(result.stdout).toString('utf8'),
+    stderr: Buffer.from(result.stderr).toString('utf8'),
+  };
+}
+
+/**
+ * Attempt to resolve PR merge conflicts by merging the base branch into the
+ * task branch inside the task worktree, then pushing the updated branch.
+ *
+ * Returns `merged` when the merge was trivial and pushed, `conflict` when git
+ * reported unresolved conflicts (worktree left untouched via `merge --abort`),
+ * and `error` for any other failure. Bounded by design: it never edits files
+ * or forces a push.
+ */
+export async function mergeBaseIntoBranch(
+  worktreePath: string,
+  remote: string,
+  baseBranch: string,
+  branch: string,
+  token?: string,
+): Promise<BaseMergeOutcome> {
+  if (branch === 'unknown' || branch === 'HEAD') return 'error';
+  try {
+    const fetch = await gitExecRaw(worktreePath, ['fetch', remote, baseBranch]);
+    if (fetch.exitCode !== 0) return 'error';
+    const merge = await gitExecRaw(worktreePath, ['merge', `${remote}/${baseBranch}`]);
+    if (merge.exitCode !== 0) {
+      await gitExec(worktreePath, ['merge', '--abort']).catch(() => {});
+      const output = `${merge.stdout}\n${merge.stderr}`;
+      return /CONFLICT/i.test(output) ? 'conflict' : 'error';
+    }
+    await pushBranch(worktreePath, remote, branch, token);
+    return 'merged';
+  } catch {
+    return 'error';
   }
 }
 

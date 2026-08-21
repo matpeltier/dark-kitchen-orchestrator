@@ -141,6 +141,28 @@ export interface AcpxSessionCheckpoint {
   readonly mcpServers?: readonly string[];
 }
 
+/**
+ * Module-level cold-start locks, shared by every adapter instance in the
+ * process. Parallel runs spawning the same npx-backed binary simultaneously
+ * race on npm's shared cache and die with ENOTEMPTY; serializing the first
+ * spawn per base command lets one install warm the cache while the rest
+ * reuse it. Already-warm binaries only pay a cheap promise hop.
+ */
+const coldStartLocks = new Map<string, Promise<void>>();
+
+async function serializeColdStart<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const tail = coldStartLocks.get(key) ?? Promise.resolve();
+  const result = tail.then(task, task);
+  coldStartLocks.set(
+    key,
+    result.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return result;
+}
+
 const ACPX_CAPABILITIES: HarnessCapability[] = [
   'sessions.persistent',
   'sessions.resume',
@@ -217,52 +239,72 @@ export class AcpxRuntimeAdapter implements HarnessRuntime {
   private async createRuntime(
     selectedMcpServers: readonly AcpMcpServerConfig[],
   ): Promise<AcpxRuntime> {
-    if (this.config.runtimeFactory) {
-      return this.config.runtimeFactory({ mcpServers: selectedMcpServers });
-    }
+    // Serialize cold starts per base command so concurrent runs never race on
+    // npm's shared npx cache. The first caller installs/warms the binary; the
+    // rest reuse the warm cache and proceed in parallel afterwards.
+    return serializeColdStart(this.coldStartKey, async () => {
+      if (this.config.runtimeFactory) {
+        return this.config.runtimeFactory({ mcpServers: selectedMcpServers });
+      }
 
-    const stateDir =
-      this.config.sessionStoreDir ??
-      join(process.env['HOME'] ?? '/tmp', '.dark-kitchen', 'acpx-sessions');
-    mkdirSync(stateDir, { recursive: true });
+      const stateDir =
+        this.config.sessionStoreDir ??
+        join(process.env['HOME'] ?? '/tmp', '.dark-kitchen', 'acpx-sessions');
+      mkdirSync(stateDir, { recursive: true });
 
-    // Dynamic import so acpx is only required at runtime, not at build time
-    let acpxModule: typeof import('acpx/runtime');
-    try {
-      acpxModule = await import('acpx/runtime');
-    } catch (error) {
-      throw new AcpClassifiedError(
-        `Unable to load the pinned acpx runtime API: ${String(error)}`,
-        'compatibility',
+      // Dynamic import so acpx is only required at runtime, not at build time
+      let acpxModule: typeof import('acpx/runtime');
+      try {
+        acpxModule = await import('acpx/runtime');
+      } catch (error) {
+        throw new AcpClassifiedError(
+          `Unable to load the pinned acpx runtime API: ${String(error)}`,
+          'compatibility',
+        );
+      }
+      const { createAcpRuntime, createRuntimeStore, createAgentRegistry } = acpxModule;
+
+      const sessionStore = createRuntimeStore({ stateDir });
+      const agentName = this.config.agent ?? 'codex';
+      const agentRegistry = createAgentRegistry(
+        this.config.agentCommand
+          ? { overrides: { [agentName]: [...toCommand(this.config.agentCommand)] } }
+          : undefined,
       );
-    }
-    const { createAcpRuntime, createRuntimeStore, createAgentRegistry } = acpxModule;
 
-    const sessionStore = createRuntimeStore({ stateDir });
-    const agentName = this.config.agent ?? 'codex';
-    const agentRegistry = createAgentRegistry(
-      this.config.agentCommand
-        ? { overrides: { [agentName]: [...toCommand(this.config.agentCommand)] } }
-        : undefined,
-    );
+      const mcpServers = selectedMcpServers.map((s) => ({
+        type: s.type ?? 'http',
+        name: s.name,
+        url: s.url,
+        // ACP requires the headers field (can be empty) for HTTP/SSE servers
+        headers: [] as Array<{ name: string; value: string }>,
+      }));
 
-    const mcpServers = selectedMcpServers.map((s) => ({
-      type: s.type ?? 'http',
-      name: s.name,
-      url: s.url,
-      // ACP requires the headers field (can be empty) for HTTP/SSE servers
-      headers: [] as Array<{ name: string; value: string }>,
-    }));
+      const runtime = createAcpRuntime({
+        cwd: process.cwd(),
+        sessionStore,
+        agentRegistry,
+        probeAgent: agentName,
+        permissionMode: normalizePermissionMode(this.config.permissionMode),
+        timeoutMs: this.config.timeoutMs ?? 120_000,
+        ...(mcpServers.length > 0 ? { mcpServers } : {}),
+      } as never) as unknown as AcpxRuntime;
 
-    return createAcpRuntime({
-      cwd: process.cwd(),
-      sessionStore,
-      agentRegistry,
-      probeAgent: agentName,
-      permissionMode: normalizePermissionMode(this.config.permissionMode),
-      timeoutMs: this.config.timeoutMs ?? 120_000,
-      ...(mcpServers.length > 0 ? { mcpServers } : {}),
-    } as never) as unknown as AcpxRuntime;
+      // Explicit warm-up inside the lock: probing spawns the binary once so
+      // the npx cache is populated before any parallel run reaches it.
+      if (runtime.probeAvailability) {
+        await runtime.probeAvailability().catch(() => undefined);
+      }
+      return runtime;
+    });
+  }
+
+  /** Base command identifying the binary whose npx cache must not be raced. */
+  private get coldStartKey(): string {
+    const command = this.config.agentCommand;
+    if (typeof command === 'string') return command;
+    if (command && command.length > 0) return command[0]!;
+    return this.config.agent ?? 'codex';
   }
 
   public async startSession(input: StartSessionInput): Promise<HarnessSession> {
@@ -709,7 +751,7 @@ export class AcpClassifiedError extends Error {
  * Classifies an acpx error message into an operational category
  * so the daemon can create the right intervention kind.
  */
-function classifyAcpError(message: string): AcpClassifiedError {
+export function classifyAcpError(message: string): AcpClassifiedError {
   const lower = message.toLowerCase();
   if (
     lower.includes('auth') ||
