@@ -93,6 +93,9 @@ importers:
       '@dark-kitchen/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@dark-kitchen/process-execution':
+        specifier: workspace:*
+        version: link:../../packages/process-execution
       '@dark-kitchen/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime

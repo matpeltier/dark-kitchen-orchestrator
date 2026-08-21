@@ -56,7 +56,8 @@
     "@dark-kitchen/workflow-engine": "workspace:*",
     "@dark-kitchen/workflows": "workspace:*",
     "@dark-kitchen/workspace-manager": "workspace:*",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "@dark-kitchen/process-execution": "workspace:*"
   },
   "dependencies": {
     "acpx": "0.13.1",

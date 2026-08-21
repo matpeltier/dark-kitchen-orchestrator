@@ -210,6 +210,33 @@ export class DaemonLoop {
     const runId = createRunId(runIdForTask(taskId));
     this.activeTasks.set(taskId, runId);
 
+    // A fresh execution supersedes prior operational incidents for this task:
+    // leaving them open would mask the new failure (coalescing) and confuse
+    // operators. Human-gate kinds (approvals, questions) are preserved.
+    try {
+      const supersededKinds = new Set([
+        'agent-failure',
+        'merge-conflict',
+        'stuck-agent',
+        'auth',
+        'quota',
+        'rate-limit',
+      ]);
+      for (const intervention of await this.deps.interventionService.list()) {
+        if (
+          intervention.scope === 'task' &&
+          intervention.targetId === taskId &&
+          supersededKinds.has(intervention.kind)
+        ) {
+          await this.deps.interventionService.dismiss(intervention.id, {
+            resolvedBy: 'superseded-by-new-run',
+          });
+        }
+      }
+    } catch {
+      // Superseding is best-effort hygiene; never block the run.
+    }
+
     try {
       const outcome = await this.deps.runWorkflowForTask(task, runId);
 

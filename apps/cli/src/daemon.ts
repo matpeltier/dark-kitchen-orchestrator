@@ -20,6 +20,7 @@
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { controlArgument, defineProcess, executeProcess } from '@dark-kitchen/process-execution';
 import { SqliteRuntimeStore } from '@dark-kitchen/runtime-store-sqlite';
 import {
   InterventionService,
@@ -842,6 +843,55 @@ export class DarkKitchenDaemon {
 
   // ─── Run / session persistence helpers ────────────────────────────────────
 
+  /**
+   * Sync a task worktree with the base branch after a merge-conflict
+   * intervention is resolved. A trivial merge is committed and pushed so the
+   * restarted run goes straight through the PR lifecycle; a real conflict is
+   * left in progress (markers intact) so the restarted workflow's agents
+   * complete it with full repository context.
+   */
+  private async syncConflictedWorktree(taskId: import('@dark-kitchen/core').TaskId): Promise<void> {
+    const slug = String(taskId)
+      .replace(/[^a-zA-Z0-9-]/g, '-')
+      .toLowerCase();
+    const capped = slug.length <= 60 ? slug : `${slug.slice(0, 29)}-${slug.slice(-30)}`;
+    const worktreePath = join(this.dataDir, 'worktrees', capped);
+    const runGit = async (...args: string[]): Promise<number> => {
+      const result = await executeProcess({
+        definition: defineProcess({
+          executable: 'git',
+          args: args.map(controlArgument),
+          label: 'conflict-sync',
+        }),
+        cwd: worktreePath,
+      });
+      return result.exitCode ?? -1;
+    };
+    try {
+      if ((await runGit('fetch', 'origin', 'main')) !== 0) {
+        this.log('warn', `Conflict sync: could not fetch origin/main for ${String(taskId)}`);
+        return;
+      }
+      const mergeExit = await runGit('merge', 'origin/main');
+      if (mergeExit === 0) {
+        if ((await runGit('push', 'origin', 'HEAD')) === 0) {
+          this.log('info', `Conflict sync: base merged and pushed for ${String(taskId)}`);
+        } else {
+          this.log('warn', `Conflict sync: base merged but push failed for ${String(taskId)}`);
+        }
+        return;
+      }
+      // Real conflict: keep the in-progress merge (markers intact) so the
+      // restarted workflow resolves it with full context.
+      this.log(
+        'info',
+        `Conflict sync: left an in-progress merge of origin/main in ${capped} for agent resolution`,
+      );
+    } catch (error) {
+      this.log('warn', `Conflict sync failed for ${String(taskId)}: ${String(error)}`);
+    }
+  }
+
   private async applyInterventionResolution(input: {
     readonly scope: 'task' | 'run' | 'agent';
     readonly targetId: string;
@@ -863,6 +913,12 @@ export class DarkKitchenDaemon {
         input.action === 'free-text' ||
         (input.action === 'approve' && input.details?.includes('Workflow gate'))
       ) {
+        // A resolved merge conflict gets a worktree/base-branch sync first so
+        // the restarted run builds on top of latest main (and, when the human
+        // provided guidance, agents see an in-progress merge to complete).
+        if (input.kind === 'merge-conflict') {
+          await this.syncConflictedWorktree(taskId);
+        }
         this.supervisor?.retryTask(taskId);
         await this.tracker?.updateTask(taskId, { status: 'ready' });
       } else if (input.action === 'stop') {

@@ -341,13 +341,23 @@ export class PrLifecycleOrchestrator {
         });
 
         if (failedChecks.length > 0) {
-          // The branch may have been fixed externally since the failure: wait
-          // briefly and re-evaluate only when the head actually moved.
+          // Retry when the branch moved externally (manual fix, CI rerun) or
+          // when some required checks have not reported yet (CI still running)
+          // — both resolve without human action if given another attempt.
+          const pendingChecks = (options.requiredChecks ?? []).filter((req) => {
+            const check = checks.find((c) => c.name === req);
+            return !check || check.status === 'queued' || check.status === 'running';
+          });
           const head = await this.scm
             .getPullRequest(options.repositoryId, pr.id)
             .then((candidate) => candidate.headSha)
             .catch(() => undefined);
-          if (attempt < maxAttempts - 1 && head !== undefined && head !== lastHeadSha) {
+          const headMoved = head !== undefined && head !== lastHeadSha;
+          if (
+            attempt < maxAttempts - 1 &&
+            head !== undefined &&
+            (headMoved || pendingChecks.length > 0)
+          ) {
             lastHeadSha = head;
             continue;
           }
