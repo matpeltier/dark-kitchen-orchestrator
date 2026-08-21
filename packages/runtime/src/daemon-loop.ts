@@ -111,6 +111,17 @@ export class DaemonLoop {
     clearInterval(this.timer);
   }
 
+  /**
+   * Wait (bounded) for in-flight task executions to settle so a graceful
+   * shutdown never closes the runtime store under an active run.
+   */
+  public async settle(timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.activeTasks.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
   public isRunning(): boolean {
     return this.running;
   }

@@ -1053,6 +1053,7 @@ export class DarkKitchenDaemon {
     this.running = false;
 
     this.daemonLoop?.stop();
+    await this.daemonLoop?.settle();
     this.channelGateway?.destroy();
     await this.adeBridge?.destroy();
     await this.mcpHttpServer?.close();
