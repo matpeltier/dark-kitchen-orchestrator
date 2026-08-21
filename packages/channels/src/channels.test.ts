@@ -456,6 +456,158 @@ describe('ChannelGateway', () => {
     gateway.destroy();
   });
 
+  it('routes unmatched inbound messages to the free-chat handler', async () => {
+    const transport = new FakeChannelTransport('free-ch');
+    const gateway = new ChannelGateway();
+    gateway.addTransport(transport);
+    const received: Array<{ body: string; senderId?: string }> = [];
+    gateway.onUnmatchedMessage((message) => {
+      received.push({
+        body: message.body,
+        ...(message.senderId ? { senderId: message.senderId } : {}),
+      });
+    });
+
+    await transport.receiveMessage({
+      id: createChannelMessageId('free-1'),
+      address: { channel: 'free-ch', conversationId: 'conv-free' },
+      body: 'hello, what are you working on?',
+      senderId: 'owner',
+      receivedAt: new Date().toISOString(),
+    });
+
+    expect(received).toEqual([{ body: 'hello, what are you working on?', senderId: 'owner' }]);
+    gateway.destroy();
+  });
+
+  it('delivers each free-chat message only once across provider redelivery', async () => {
+    const transport = new FakeChannelTransport('free-dedup');
+    const gateway = new ChannelGateway();
+    gateway.addTransport(transport);
+    let count = 0;
+    gateway.onUnmatchedMessage(() => {
+      count += 1;
+    });
+    const inbound = {
+      id: createChannelMessageId('free-dup'),
+      address: { channel: 'free-dedup', conversationId: 'conv' },
+      body: 'ping',
+      receivedAt: new Date().toISOString(),
+    } as const;
+    await transport.receiveMessage(inbound);
+    await transport.receiveMessage(inbound);
+    expect(count).toBe(1);
+    gateway.destroy();
+  });
+
+  it('applies the inbound authorization hook to free-chat messages (fail-closed)', async () => {
+    const transport = new FakeChannelTransport('free-auth');
+    const gateway = new ChannelGateway({
+      authorizeInbound: (_transportId, message) => message.senderId === 'owner',
+    });
+    gateway.addTransport(transport);
+    let count = 0;
+    gateway.onUnmatchedMessage(() => {
+      count += 1;
+    });
+    await transport.receiveMessage({
+      id: createChannelMessageId('free-attack'),
+      address: { channel: 'free-auth', conversationId: 'conv' },
+      body: 'inject',
+      senderId: 'attacker',
+      receivedAt: new Date().toISOString(),
+    });
+    expect(count).toBe(0);
+    gateway.destroy();
+  });
+
+  it('gives intervention replies priority over the free-chat handler', async () => {
+    const transport = new FakeChannelTransport('priority-ch');
+    const gateway = new ChannelGateway();
+    gateway.addTransport(transport);
+    const routed: string[] = [];
+    const freeChat: string[] = [];
+    gateway.onInterventionReply((_id, reply) => {
+      routed.push(reply.body);
+    });
+    gateway.onUnmatchedMessage((message) => {
+      freeChat.push(message.body);
+    });
+    await gateway.notify({
+      address: { channel: 'priority-ch', conversationId: 'conv-prio' },
+      body: 'question',
+      interventionId: createInterventionId('prio-int'),
+    });
+    await transport.receiveMessage({
+      id: createChannelMessageId('prio-reply'),
+      address: { channel: 'priority-ch', conversationId: 'conv-prio' },
+      body: 'the answer',
+      receivedAt: new Date().toISOString(),
+    });
+    expect(routed).toEqual(['the answer']);
+    expect(freeChat).toEqual([]);
+    gateway.destroy();
+  });
+
+  it('exposes the origin address and transport on intervention replies', async () => {
+    const transport = new FakeChannelTransport('addr-ch');
+    const gateway = new ChannelGateway();
+    gateway.addTransport(transport);
+    const origins: Array<{ address?: unknown; transportId?: string }> = [];
+    gateway.onInterventionReply((_id, reply) => {
+      origins.push({ address: reply.address, transportId: reply.transportId });
+    });
+    await gateway.notify(
+      {
+        address: { channel: 'addr-ch', conversationId: 'conv-addr' },
+        body: 'question',
+        interventionId: createInterventionId('addr-int'),
+      },
+      'addr-ch',
+    );
+    await transport.receiveMessage({
+      id: createChannelMessageId('addr-reply'),
+      address: { channel: 'addr-ch', conversationId: 'conv-addr' },
+      body: 'answer',
+      receivedAt: new Date().toISOString(),
+    });
+    expect(origins).toEqual([
+      { address: { channel: 'addr-ch', conversationId: 'conv-addr' }, transportId: 'addr-ch' },
+    ]);
+    gateway.destroy();
+  });
+
+  it('re-emits a notification past an existing correlation when replay is requested', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dk-channel-replay-'));
+    const databasePath = join(directory, 'runtime.db');
+    const address = { channel: 'telegram', conversationId: 'chat-replay' } as const;
+    const interventionId = createInterventionId('replay-intervention');
+    try {
+      const store = await SqliteRuntimeStore.open({ databasePath });
+      const gateway = new ChannelGateway({ correlationStore: store });
+      const transport = new FakeChannelTransport('telegram-main');
+      gateway.addTransport(transport);
+
+      await gateway.notify({ address, body: 'first notice', interventionId }, transport.id);
+      expect(transport.sent).toHaveLength(1);
+
+      // Default notify dedups against the durable correlation…
+      await gateway.notify({ address, body: 'first notice', interventionId }, transport.id);
+      expect(transport.sent).toHaveLength(1);
+
+      // …while a startup replay must re-emit for humans who missed it.
+      await gateway.notify({ address, body: 'first notice', interventionId }, transport.id, {
+        replay: true,
+      });
+      expect(transport.sent).toHaveLength(2);
+
+      gateway.destroy();
+      store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('routes a reply after restart and durably deactivates the intervention', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dk-channel-correlation-'));
     const databasePath = join(directory, 'runtime.db');

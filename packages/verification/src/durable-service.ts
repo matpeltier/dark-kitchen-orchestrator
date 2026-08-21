@@ -18,13 +18,6 @@ export interface DurableVerificationServiceOptions {
   readonly getTaskDescription?: (taskId: TaskId) => Promise<string | undefined>;
 }
 
-export interface VerificationGateResult {
-  readonly passed: boolean;
-  readonly blockingProfiles: readonly string[];
-  readonly failedProfiles: readonly string[];
-  readonly evidenceRefs: readonly string[];
-}
-
 interface VerificationStateFile {
   readonly version: 1;
   readonly runs: readonly VerificationRun[];
@@ -179,34 +172,6 @@ export class DurableVerificationService {
       completedAt: new Date().toISOString(),
       ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
     });
-  }
-
-  public async gate(taskId: string): Promise<VerificationGateResult> {
-    const inspected = await this.inspectTaskRequirements(taskId);
-    const required = inspected.requirements
-      .map((requirement) => this.profiles.find((profile) => profile.id === requirement.profileId))
-      .filter((profile): profile is VerificationProfile => profile?.blocking !== false);
-    const runs = await this.listRuns(taskId);
-    const failedProfiles: string[] = [];
-    const evidenceRefs: string[] = [];
-    for (const profile of required) {
-      const latest = runs.filter((run) => run.profileId === profile.id).at(-1);
-      if (!latest || latest.state !== 'passed') {
-        failedProfiles.push(profile.id);
-        continue;
-      }
-      evidenceRefs.push(
-        ...latest.criterionResults.flatMap((criterion) =>
-          (criterion.evidence ?? []).map((evidence) => evidence.artifactRef),
-        ),
-      );
-    }
-    return {
-      passed: failedProfiles.length === 0,
-      blockingProfiles: required.map((profile) => profile.id),
-      failedProfiles,
-      evidenceRefs,
-    };
   }
 
   private async update(

@@ -64,7 +64,13 @@ The intervention, outbound message/code correlations, processed inbound message 
 
 ## Delivery behavior
 
-The gateway retries a failed send a bounded number of times with exponential backoff while the process is running. Multiple channel adapters connect independently, so one unavailable provider does not prevent another healthy adapter from starting. Notifications longer than provider limits are truncated with a visible marker; the durable intervention retains its bounded full summary/details. The delivery queue itself is not persisted and open undelivered interventions are not automatically re-emitted after restart; MCP is the recovery path.
+The gateway retries a failed send a bounded number of times with exponential backoff while the process is running. Multiple channel adapters connect independently, so one unavailable provider does not prevent another healthy adapter from starting. Notifications longer than provider limits are truncated with a visible marker; the durable intervention retains its bounded full summary/details. The delivery queue itself is not persisted; however, at daemon startup every still-open or acknowledged intervention is re-emitted to all configured channels (marked as replay), so an unattended restart does not silently drop pending requests. MCP remains the fallback when a channel is unavailable or an operator cannot safely identify the intended intervention.
+
+## Free-form chat
+
+An inbound channel message that does not resolve to any pending intervention is not dropped: it is forwarded to the active PM agent session (the most recent instructable session whose role matches `pm`, otherwise the most recent instructable session), prefixed with the sender context and redacted before delivery. The origin channel always receives feedback — a transmission acknowledgement, a no-active-project notice, or a failure notice. The PM can answer the human by raising an intervention (`dk_ask_human`), which is notified on the configured channels like any other request. Channel authorization (conversation allowlist and `allowedSenderIds`) applies to free-form chat exactly as it applies to intervention replies.
+
+After an intervention is resolved from a channel, the origin channel receives a short per-action confirmation (retry relaunched, stop applied, approval resumed, answer transmitted).
 
 Delivery correlation is created only after the provider returns a real message ID. A failed send remains auditable and must not create a false reply target.
 

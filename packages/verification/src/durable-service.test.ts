@@ -48,7 +48,7 @@ describe('portable verification requirements', () => {
 });
 
 describe('DurableVerificationService', () => {
-  it('persists evidence, resumes passed work, gates merges, and bounds retries', async () => {
+  it('persists evidence, resumes passed work, and bounds retries', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dk-verification-'));
     const statePath = join(root, 'verification.json');
     const options = {
@@ -85,17 +85,11 @@ describe('DurableVerificationService', () => {
 
     const reopened = new DurableVerificationService(options);
     expect((await reopened.request({ taskId: 'task-1', profileId: 'web-e2e' })).id).toBe(retry.id);
-    expect(await reopened.gate('task-1')).toMatchObject({
-      passed: true,
-      blockingProfiles: ['web-e2e'],
-      failedProfiles: [],
-      evidenceRefs: ['artifacts/task-1/dashboard.png'],
-    });
     await expect(reopened.retry(retry.id)).rejects.toThrow(/cannot be retried/);
     expect(JSON.parse(await readFile(statePath, 'utf8'))).toMatchObject({ version: 1 });
   });
 
-  it('reports a failed blocking gate and cancels idempotently', async () => {
+  it('cancels idempotently', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dk-verification-'));
     const service = new DurableVerificationService({
       statePath: join(root, 'verification.json'),
@@ -105,9 +99,5 @@ describe('DurableVerificationService', () => {
     const run = await service.request({ taskId: 'task-2' });
     expect((await service.cancel(run.id)).state).toBe('cancelled');
     expect((await service.cancel(run.id)).state).toBe('cancelled');
-    expect(await service.gate('task-2')).toMatchObject({
-      passed: false,
-      failedProfiles: ['web-e2e'],
-    });
   });
 });

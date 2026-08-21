@@ -371,7 +371,7 @@ function validateResolveInput(input: ResolveInterventionInput): void {
   }
 }
 
-function redactSensitive(value: string): string {
+export function redactSensitive(value: string): string {
   return value
     .replace(/\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '[REDACTED]')
     .replace(/((?:bearer|token|api[_-]?key|secret|password)\s*[:=]\s*)\S+/gi, '$1[REDACTED]')

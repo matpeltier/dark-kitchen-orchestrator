@@ -140,7 +140,19 @@ export class InMemoryCorrelationStore implements ChannelCorrelationStore {
 
 export type InterventionReplyHandler = (
   interventionId: InterventionId,
-  reply: { body: string; actionValue?: string; senderId?: string },
+  reply: {
+    body: string;
+    actionValue?: string;
+    senderId?: string;
+    /** Conversation the human replied from. */
+    address: ChannelAddress;
+    transportId: string;
+  },
+) => void | Promise<void>;
+
+export type UnmatchedMessageHandler = (
+  message: InboundMessage,
+  transportId: string,
 ) => void | Promise<void>;
 
 export interface ChannelGatewayOptions {
@@ -179,6 +191,7 @@ export class ChannelGateway {
   private readonly transports = new Map<string, ChannelTransport>();
   private readonly correlations: ChannelCorrelationStore;
   private readonly replyHandlers: InterventionReplyHandler[] = [];
+  private readonly unmatchedHandlers: UnmatchedMessageHandler[] = [];
   private readonly unsubscribers: Array<() => void> = [];
   private readonly options: Required<
     Pick<
@@ -229,13 +242,17 @@ export class ChannelGateway {
    * Send a notification to all configured transports (or a specific one).
    * If the message is tied to an intervention, stores the correlation.
    */
-  public async notify(message: OutboundMessage, transportId?: string): Promise<NotificationReport> {
+  public async notify(
+    message: OutboundMessage,
+    transportId?: string,
+    options?: { readonly replay?: boolean },
+  ): Promise<NotificationReport> {
     const targets = transportId
       ? ([this.transports.get(transportId)].filter(Boolean) as ChannelTransport[])
       : [...this.transports.values()];
 
     const deliveries = await Promise.all(
-      targets.map((transport) => this.deliverToTransport(transport, message)),
+      targets.map((transport) => this.deliverToTransport(transport, message, options?.replay)),
     );
     return { deliveries, delivered: deliveries.some((delivery) => delivery.delivered) };
   }
@@ -246,6 +263,19 @@ export class ChannelGateway {
     return () => {
       const idx = this.replyHandlers.indexOf(handler);
       if (idx >= 0) this.replyHandlers.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Subscribe to inbound messages that did not resolve to any pending
+   * intervention (free-form chat). Handlers run only after the standard
+   * inbound validation and authorization hooks.
+   */
+  public onUnmatchedMessage(handler: UnmatchedMessageHandler): () => void {
+    this.unmatchedHandlers.push(handler);
+    return () => {
+      const idx = this.unmatchedHandlers.indexOf(handler);
+      if (idx >= 0) this.unmatchedHandlers.splice(idx, 1);
     };
   }
 
@@ -274,15 +304,21 @@ export class ChannelGateway {
 
     const resolution = await this.resolveIntervention(transportId, message);
     const interventionId = resolution?.interventionId;
-    if (!interventionId || this.replyHandlers.length === 0) {
+    if (!interventionId) {
+      await this.dispatchUnmatched(transportId, message, receipt, replayKey);
+      return;
+    }
+    if (this.replyHandlers.length === 0) {
       this.processingInbound.delete(replayKey);
       return;
     }
 
     try {
       for (const handler of this.replyHandlers) {
-        const reply: { body: string; actionValue?: string; senderId?: string } = {
+        const reply: Parameters<InterventionReplyHandler>[1] = {
           body: resolution.body,
+          address: message.address,
+          transportId,
         };
         if (message.actionValue) Object.assign(reply, { actionValue: message.actionValue });
         if (message.senderId) Object.assign(reply, { senderId: message.senderId });
@@ -300,6 +336,30 @@ export class ChannelGateway {
     } catch {
       // Keep the correlation active so a delivery whose handler failed before
       // committing runtime state can be retried, including with the same ID.
+    } finally {
+      this.processingInbound.delete(replayKey);
+    }
+  }
+
+  private async dispatchUnmatched(
+    transportId: string,
+    message: InboundMessage,
+    receipt: { transportId: string; address: ChannelAddress; messageId: ChannelMessageId },
+    replayKey: string,
+  ): Promise<void> {
+    if (this.unmatchedHandlers.length === 0) {
+      this.processingInbound.delete(replayKey);
+      return;
+    }
+    try {
+      for (const handler of this.unmatchedHandlers) await handler(message, transportId);
+      await this.correlations.saveProcessedChannelInbound({
+        ...receipt,
+        processedAt: new Date().toISOString(),
+      });
+      this.rememberInbound(replayKey);
+    } catch {
+      // Keep the message retryable if a handler failed before committing.
     } finally {
       this.processingInbound.delete(replayKey);
     }
@@ -359,14 +419,15 @@ export class ChannelGateway {
   private deliverToTransport(
     transport: ChannelTransport,
     message: OutboundMessage,
+    replay = false,
   ): Promise<NotificationDelivery> {
     const key = `${transport.id}\u0000${message.address.channel}\u0000${message.address.conversationId}\u0000${message.interventionId ?? messageFingerprint(message)}`;
     const completed = this.completedDeliveries.get(key);
-    if (completed) return Promise.resolve(completed);
+    if (completed && !replay) return Promise.resolve(completed);
     const current = this.inFlightNotifications.get(key);
     if (current) return current;
 
-    const delivery = this.attemptDelivery(transport, message).finally(() => {
+    const delivery = this.attemptDelivery(transport, message, replay).finally(() => {
       this.inFlightNotifications.delete(key);
     });
     void delivery.then((result) => {
@@ -384,8 +445,9 @@ export class ChannelGateway {
   private async attemptDelivery(
     transport: ChannelTransport,
     message: OutboundMessage,
+    replay = false,
   ): Promise<NotificationDelivery> {
-    if (message.interventionId) {
+    if (message.interventionId && !replay) {
       const previous = await this.correlations.listActiveChannelMessageCorrelations({
         transportId: transport.id,
         address: message.address,

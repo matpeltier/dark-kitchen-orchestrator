@@ -24,6 +24,7 @@ import type {
   FullScmAdapter,
   MergePullRequestInput,
   PushBranchInput,
+  UpdatePullRequestBodyInput,
 } from './contracts.js';
 import { ChecksFailedError, MergeRefusedError, ScmError } from './contracts.js';
 
@@ -145,6 +146,17 @@ export class GitHubScmAdapter implements FullScmAdapter {
     return reusable
       ? normalizePullRequest(reusable, this.config.owner, this.config.repo)
       : undefined;
+  }
+
+  public async updatePullRequestBody(input: UpdatePullRequestBodyInput): Promise<PullRequest> {
+    const prNumber = extractPrNumber(input.pullRequestId);
+    const { data } = await this.octokit.pulls.update({
+      owner: this.config.owner,
+      repo: this.config.repo,
+      pull_number: prNumber,
+      body: redactSensitive(input.body),
+    });
+    return normalizePullRequest(data, this.config.owner, this.config.repo);
   }
 
   public async listChecks(pullRequestId: PullRequestId): Promise<readonly Check[]> {
@@ -387,6 +399,15 @@ export class MockScmAdapter implements FullScmAdapter {
       matching.find((candidate) => candidate.state === 'open') ??
       matching.find((candidate) => candidate.merged);
     return pr ? normalizeMockPr(pr) : undefined;
+  }
+
+  public async updatePullRequestBody(input: UpdatePullRequestBodyInput): Promise<PullRequest> {
+    const n = extractPrNumber(input.pullRequestId);
+    const pr = this.prs.get(n);
+    if (!pr) throw new ScmError(`PR #${n} not found`);
+    pr.body = redactSensitive(input.body);
+    this.lastPrBody = pr.body;
+    return normalizeMockPr(pr);
   }
 
   public async listChecks(pullRequestId: PullRequestId): Promise<readonly Check[]> {

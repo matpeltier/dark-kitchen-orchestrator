@@ -269,46 +269,81 @@ export class WorkflowBuilder {
       return { role: options.role, result: cached, callKey };
     }
 
-    return this.withRetry(
-      callKey,
-      async () => {
-        if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
-        let result: unknown;
-        const release = await this.limiter.acquire(this.ctx.signal);
-        try {
-          this.ctx.onProgress?.({ kind: 'step.start', callKey, role: options.role });
-          const runner = await raceWithSignal(
-            Promise.resolve(this.ctx.resolver(options.role)),
-            this.ctx.signal,
-          );
-          // A lazy resolver may settle after cancellation. Never invoke the
-          // returned runner unless the workflow is still active.
-          if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
-          const callInput =
-            options.context !== undefined
-              ? { role: options.role, prompt: options.prompt, context: options.context }
-              : { role: options.role, prompt: options.prompt };
-          result = await raceWithSignal(runner(callInput, this.ctx.signal), this.ctx.signal);
-        } catch (err) {
-          if (this.ctx.signal.aborted || err instanceof WorkflowCancelledError) {
-            throw new WorkflowCancelledError();
-          }
-          throw new WorkflowAgentError(
-            `Agent role "${options.role}" failed: ${String(err)}`,
-            options.role,
-            callKey,
-          );
-        } finally {
-          release();
-        }
+    // An interrupted previous attempt may have persisted a session checkpoint.
+    // Offer it to the resolver so a persistent runtime can reattach instead of
+    // starting a brand-new session. It is read once per run and consumed by
+    // the first attempt only, so retries never replay the same prompt into an
+    // already-restored session.
+    const storedCheckpoint =
+      this.ctx.journal.getInFlight !== undefined
+        ? await raceWithSignal(this.ctx.journal.getInFlight(callKey), this.ctx.signal)
+        : undefined;
+    let checkpointConsumed = false;
 
-        await raceWithSignal(this.ctx.journal.set(callKey, result), this.ctx.signal);
-        this.ctx.onProgress?.({ kind: 'step.complete', callKey, role: options.role });
-        return { role: options.role, result, callKey } as AgentCallOutput;
-      },
-      options.retryPolicy,
-      options.role,
-    );
+    try {
+      return await this.withRetry(
+        callKey,
+        async () => {
+          if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
+          let result: unknown;
+          const release = await this.limiter.acquire(this.ctx.signal);
+          try {
+            this.ctx.onProgress?.({ kind: 'step.start', callKey, role: options.role });
+            const runner = await raceWithSignal(
+              Promise.resolve(this.ctx.resolver(options.role)),
+              this.ctx.signal,
+            );
+            // A lazy resolver may settle after cancellation. Never invoke the
+            // returned runner unless the workflow is still active.
+            if (this.ctx.signal.aborted) throw new WorkflowCancelledError();
+            const resumeCheckpoint = checkpointConsumed ? undefined : storedCheckpoint;
+            checkpointConsumed = true;
+            if (resumeCheckpoint !== undefined && this.ctx.journal.clearInFlight !== undefined) {
+              await raceWithSignal(this.ctx.journal.clearInFlight(callKey), this.ctx.signal);
+            }
+            const callInput = {
+              role: options.role,
+              prompt: options.prompt,
+              ...(options.context !== undefined ? { context: options.context } : {}),
+              callKey,
+              ...(resumeCheckpoint !== undefined ? { resumeCheckpoint } : {}),
+              onCheckpoint: (checkpoint: unknown) =>
+                this.ctx.journal.markInFlight?.(callKey, checkpoint),
+            };
+            result = await raceWithSignal(runner(callInput, this.ctx.signal), this.ctx.signal);
+          } catch (err) {
+            if (this.ctx.signal.aborted || err instanceof WorkflowCancelledError) {
+              throw new WorkflowCancelledError();
+            }
+            throw new WorkflowAgentError(
+              `Agent role "${options.role}" failed: ${String(err)}`,
+              options.role,
+              callKey,
+            );
+          } finally {
+            release();
+          }
+
+          await raceWithSignal(this.ctx.journal.set(callKey, result), this.ctx.signal);
+          if (this.ctx.journal.clearInFlight !== undefined) {
+            await raceWithSignal(this.ctx.journal.clearInFlight(callKey), this.ctx.signal);
+          }
+          this.ctx.onProgress?.({ kind: 'step.complete', callKey, role: options.role });
+          return { role: options.role, result, callKey } as AgentCallOutput;
+        },
+        options.retryPolicy,
+        options.role,
+      );
+    } catch (err) {
+      // A definitive failure or cancellation ends this run; drop any in-flight
+      // checkpoint so a future resume of the same callKey starts fresh instead
+      // of restoring a session that contains the failure. Best-effort: never
+      // mask the original error.
+      if (this.ctx.journal.clearInFlight !== undefined) {
+        await Promise.resolve(this.ctx.journal.clearInFlight(callKey)).catch(() => undefined);
+      }
+      throw err;
+    }
   }
 
   private async withRetry<T>(

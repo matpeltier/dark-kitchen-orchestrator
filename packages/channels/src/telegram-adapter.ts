@@ -81,11 +81,20 @@ export interface TelegramChannelAdapterOptions {
   readonly webhookSecret?: string;
   /** Loopback is the safe default; expose it through an authenticated proxy. */
   readonly webhookHost?: string;
+  /** Polling reconnection: base delay for the exponential backoff. */
+  readonly reconnectBaseDelayMs?: number;
+  /** Polling reconnection: upper bound for a single backoff delay. */
+  readonly reconnectMaxDelayMs?: number;
+  /** Polling reconnection: give up after this many consecutive failures. */
+  readonly maxReconnectAttempts?: number;
 }
 
 type TelegramBotFactory = (token: string) => Promise<TelegramBot>;
 
 const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
+const DEFAULT_RECONNECT_BASE_DELAY_MS = 1_000;
+const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
 
 export class TelegramChannelAdapter {
   public readonly channelId = 'telegram';
@@ -100,6 +109,9 @@ export class TelegramChannelAdapter {
   private connected = false;
   private botUsername: string | undefined;
   private lastActivity: Date | undefined;
+  private stopped = false;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
   public constructor(
     token: string,
@@ -119,29 +131,27 @@ export class TelegramChannelAdapter {
 
   public async connect(): Promise<void> {
     if (this.connected) return;
-    const bot = await this.botFactory(this.token);
+    this.stopped = false;
+    const bot = await this.createBot();
     this.bot = bot;
-    this.registerHandlers(bot);
-    await bot.init();
-    this.botUsername = (await bot.api.getMe()).username;
 
     if ((this.options.mode ?? 'polling') === 'webhook') {
       await this.startWebhook(bot);
     } else {
-      // Pending replies are part of the durable intervention flow. Dropping
-      // them after a daemon restart would strand the waiting PM/agent.
-      void bot
-        .start({ drop_pending_updates: this.options.dropPendingUpdates ?? false })
-        .catch((error: unknown) => {
-          this.connected = false;
-          process.stderr.write(`[channels] telegram polling stopped: ${safeError(error)}\n`);
-        });
+      this.startPolling(bot);
     }
     this.connected = true;
+    this.reconnectAttempts = 0;
   }
 
   public async disconnect(): Promise<void> {
+    this.stopped = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.connected = false;
+    this.reconnectAttempts = 0;
     if ((this.options.mode ?? 'polling') === 'webhook') {
       await this.stopWebhook();
     } else {
@@ -194,6 +204,61 @@ export class TelegramChannelAdapter {
       ...(this.botUsername ? { accountId: this.botUsername } : {}),
       ...(this.lastActivity ? { lastActivity: this.lastActivity } : {}),
     };
+  }
+
+  private async createBot(): Promise<TelegramBot> {
+    const bot = await this.botFactory(this.token);
+    this.registerHandlers(bot);
+    await bot.init();
+    this.botUsername = (await bot.api.getMe()).username;
+    return bot;
+  }
+
+  private startPolling(bot: TelegramBot): void {
+    // Pending replies are part of the durable intervention flow. Dropping
+    // them after a daemon restart would strand the waiting PM/agent.
+    void bot
+      .start({ drop_pending_updates: this.options.dropPendingUpdates ?? false })
+      .catch((error: unknown) => {
+        if (this.stopped) return;
+        this.connected = false;
+        process.stderr.write(`[channels] telegram polling stopped: ${safeError(error)}\n`);
+        this.scheduleReconnect();
+      });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.connected || this.reconnectTimer) return;
+    const maxAttempts = this.options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
+    if (this.reconnectAttempts >= maxAttempts) {
+      process.stderr.write(
+        `[channels] telegram reconnection gave up after ${String(maxAttempts)} attempts\n`,
+      );
+      return;
+    }
+    const base = this.options.reconnectBaseDelayMs ?? DEFAULT_RECONNECT_BASE_DELAY_MS;
+    const max = this.options.reconnectMaxDelayMs ?? DEFAULT_RECONNECT_MAX_DELAY_MS;
+    const delay = Math.min(base * 2 ** this.reconnectAttempts, max);
+    this.reconnectAttempts += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.reconnect();
+    }, delay);
+  }
+
+  private async reconnect(): Promise<void> {
+    if (this.stopped || this.connected) return;
+    try {
+      const bot = await this.createBot();
+      this.bot = bot;
+      this.startPolling(bot);
+      this.connected = true;
+      process.stderr.write('[channels] telegram polling reconnected\n');
+    } catch (error) {
+      this.connected = false;
+      process.stderr.write(`[channels] telegram reconnection failed: ${safeError(error)}\n`);
+      this.scheduleReconnect();
+    }
   }
 
   private registerHandlers(bot: TelegramBot): void {

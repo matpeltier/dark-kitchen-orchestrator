@@ -33,6 +33,11 @@ export interface CreatePullRequestInput {
   readonly taskTitle?: string;
 }
 
+export interface UpdatePullRequestBodyInput {
+  readonly pullRequestId: PullRequestId;
+  readonly body: string;
+}
+
 export type MergeStrategy = 'squash' | 'merge' | 'rebase';
 
 export interface MergePullRequestInput {
@@ -66,6 +71,7 @@ export interface FullScmAdapter {
     repositoryId: RepositoryId,
     sourceBranch: string,
   ): Promise<PullRequest | undefined>;
+  updatePullRequestBody(input: UpdatePullRequestBodyInput): Promise<PullRequest>;
   listChecks(pullRequestId: PullRequestId): Promise<readonly Check[]>;
   pollChecks(pullRequestId: PullRequestId, policy: CheckPollPolicy): Promise<readonly Check[]>;
   merge(input: MergePullRequestInput): Promise<PullRequest>;

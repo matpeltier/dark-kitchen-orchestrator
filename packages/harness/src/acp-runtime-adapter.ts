@@ -723,7 +723,8 @@ function classifyAcpError(message: string): AcpClassifiedError {
     lower.includes('quota') ||
     lower.includes('credit') ||
     lower.includes('billing') ||
-    lower.includes('insufficient')
+    lower.includes('insufficient') ||
+    lower.includes('usage limit')
   ) {
     return new AcpClassifiedError(message, 'quota');
   }

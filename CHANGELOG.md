@@ -7,9 +7,20 @@ Notable user-visible changes to Dark Kitchen are documented here. Tagged GitHub 
 ### Added
 
 - Startup crash recovery: the daemon reconciles persisted runs, resuming `running`/`interrupted` runs through durable journal replay and re-seeding human-gated `waiting`/`blocked` runs as paused.
+- Persistent harness sessions (ACP/acpx) are reattached to the in-flight workflow turn after a daemon restart via restart-safe session checkpoints recorded in the durable journal; retries never replay a restored prompt twice and stale checkpoints are purged on definitive failure or cancellation.
+- Free-form channel chat: inbound messages that do not resolve a pending intervention are forwarded to the active PM agent session (with channel authorization and secret redaction), and the origin channel always receives an acknowledgement.
+- Per-action resolution acknowledgements are sent back to the origin channel after an intervention is resolved from it.
+- Open or acknowledged interventions are re-emitted to all configured channels at daemon startup so a restart does not silently drop pending requests.
+- Telegram long polling reconnects automatically with bounded exponential backoff after a transport failure.
+- Reused pull requests now get their body refreshed with fresh verification proofs, including `sha256` evidence attestations visible on GitHub.
+
+### Changed
+
 - Graceful shutdown marks in-flight runs `interrupted` so the next start resumes them instead of silently re-scheduling.
 - The SSE dashboard now reports a clean "port already in use" error instead of crashing with an unhandled `EADDRINUSE`.
 - Readable local verification evidence is recorded with a `sha256` content digest; commit discovery no longer fails on a fresh repository with no commits.
+- Codex quota/usage-limit errors are classified as `quota` instead of `generic`.
+- Removed the unused `DurableVerificationService.gate()` dead code (the effective merge gate is `validateVerificationProofs`).
 
 ## 0.1.1 - 2026-08-20
 

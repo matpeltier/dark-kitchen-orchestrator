@@ -22,6 +22,7 @@ export interface DurableJournalEntry {
 /** Simple in-memory implementation of DurableJournal (used when SQLite is unavailable). */
 export class InProcessDurableJournal implements JournalStore {
   private readonly entries = new Map<string, DurableJournalEntry>();
+  private readonly inFlight = new Map<string, unknown>();
 
   public async get(callKey: string): Promise<WorkflowStepResult | undefined> {
     const entry = this.entries.get(callKey);
@@ -56,6 +57,18 @@ export class InProcessDurableJournal implements JournalStore {
       completedAt: now,
       errorMessage: error instanceof Error ? error.message : String(error),
     });
+  }
+
+  public async markInFlight(callKey: string, checkpoint: unknown): Promise<void> {
+    this.inFlight.set(callKey, checkpoint);
+  }
+
+  public async getInFlight(callKey: string): Promise<unknown | undefined> {
+    return this.inFlight.get(callKey);
+  }
+
+  public async clearInFlight(callKey: string): Promise<void> {
+    this.inFlight.delete(callKey);
   }
 
   public getEntry(callKey: string): DurableJournalEntry | undefined {
@@ -112,6 +125,13 @@ export class SqliteDurableJournal implements JournalStore {
         error_message TEXT
       )
     `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS workflow_journal_inflight (
+        call_key TEXT PRIMARY KEY NOT NULL,
+        checkpoint TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
     this.initialized = true;
   }
 
@@ -140,6 +160,34 @@ export class SqliteDurableJournal implements JournalStore {
     `,
       )
       .run(callKey, this.workflowRunId, JSON.stringify(result), now, now);
+  }
+
+  public async markInFlight(callKey: string, checkpoint: unknown): Promise<void> {
+    await this.ensureDb();
+    this.db
+      .prepare(
+        `
+      INSERT INTO workflow_journal_inflight (call_key, checkpoint, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(call_key) DO UPDATE SET
+        checkpoint = excluded.checkpoint,
+        updated_at = excluded.updated_at
+    `,
+      )
+      .run(callKey, JSON.stringify(checkpoint), new Date().toISOString());
+  }
+
+  public async getInFlight(callKey: string): Promise<unknown | undefined> {
+    await this.ensureDb();
+    const row = this.db
+      .prepare('SELECT checkpoint FROM workflow_journal_inflight WHERE call_key = ?')
+      .get(callKey) as { checkpoint: string } | undefined;
+    return row ? (JSON.parse(row.checkpoint) as unknown) : undefined;
+  }
+
+  public async clearInFlight(callKey: string): Promise<void> {
+    await this.ensureDb();
+    this.db.prepare('DELETE FROM workflow_journal_inflight WHERE call_key = ?').run(callKey);
   }
 
   public close(): void {

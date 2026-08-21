@@ -126,4 +126,11 @@ export interface HarnessRuntime {
   stopSession(sessionId: AgentSessionId): Promise<void>;
   getSession(sessionId: AgentSessionId): Promise<HarnessSession | undefined>;
   subscribe(sessionId: AgentSessionId, handler: HarnessEventHandler): () => void;
+  /**
+   * Optional crash-recovery surface. Runtimes with persistent sessions export
+   * a restart-safe checkpoint; `restoreSession` reattaches it after a daemon
+   * restart so an interrupted turn can continue in the same session.
+   */
+  checkpointSession?(sessionId: AgentSessionId): unknown;
+  restoreSession?(checkpoint: unknown): Promise<HarnessSession>;
 }

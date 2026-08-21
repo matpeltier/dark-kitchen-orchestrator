@@ -17,6 +17,8 @@ export interface WorkflowResult {
   readonly commits: readonly string[];
   readonly verificationGateSummary?: string;
   readonly evidenceRefs?: readonly string[];
+  /** Content digests (`sha256:<hex>`) keyed by evidence reference when readable. */
+  readonly evidenceAttestations?: Readonly<Record<string, string>>;
   /** Structured, independently produced verification proofs. */
   readonly verificationResults?: readonly VerificationProof[];
   readonly warnings?: readonly string[];
@@ -243,6 +245,10 @@ export class PrLifecycleOrchestrator {
           body,
           taskId: result.taskId,
         });
+      } else if (pr.status === 'open') {
+        // A reused PR must always carry the freshest proofs from this run;
+        // otherwise retries publish evidence that never reaches GitHub.
+        await this.scm.updatePullRequestBody({ pullRequestId: pr.id, body });
       }
     } catch (error) {
       return {
@@ -471,7 +477,8 @@ function buildPrBody(result: WorkflowResult): string {
     for (const proof of result.verificationResults) {
       const summary = proof.summary ? ` — ${sanitizePrText(proof.summary)}` : '';
       lines.push(`- ${escapeMarkdown(proof.profileId)}: **${proof.status}**${summary}`);
-      for (const ref of proof.evidenceRefs) lines.push(`  - Evidence: ${escapeMarkdown(ref)}`);
+      for (const ref of proof.evidenceRefs)
+        lines.push(`  - Evidence: ${formatEvidenceRef(ref, result.evidenceAttestations)}`);
     }
   }
   if (result.verificationGateSummary) {
@@ -480,7 +487,7 @@ function buildPrBody(result: WorkflowResult): string {
   if (result.evidenceRefs && result.evidenceRefs.length > 0) {
     lines.push('', '**Evidence:**');
     for (const ref of result.evidenceRefs) {
-      lines.push(`- ${escapeMarkdown(ref)}`);
+      lines.push(`- ${formatEvidenceRef(ref, result.evidenceAttestations)}`);
     }
   }
   if (result.warnings && result.warnings.length > 0) {
@@ -490,6 +497,11 @@ function buildPrBody(result: WorkflowResult): string {
     }
   }
   return lines.join('\n');
+}
+
+function formatEvidenceRef(ref: string, attestations?: Readonly<Record<string, string>>): string {
+  const digest = attestations?.[ref];
+  return escapeMarkdown(digest ? `${ref} — ${digest}` : ref);
 }
 
 function validateVerificationProofs(

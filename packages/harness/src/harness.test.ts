@@ -23,6 +23,7 @@ import {
 } from './index.js';
 import type { ManagedHarnessProfile, UserManagedHarnessProfile } from './contracts.js';
 import type { AcpxRuntimeBoundary } from './acp-runtime-adapter.js';
+import { AcpClassifiedError } from './acp-runtime-adapter.js';
 import { createRunId, createTaskId, createWorkspaceId } from '@dark-kitchen/core';
 
 // ─── Role router ──────────────────────────────────────────────────────────────
@@ -632,6 +633,7 @@ describe('AcpxRuntimeAdapter boundary', () => {
 
   it('checkpoints and reconnects a persistent session after adapter restart', async () => {
     const ensured: Array<{ sessionKey: string; cwd?: string }> = [];
+    const turns: string[] = [];
     const runtime: AcpxRuntimeBoundary = {
       async ensureSession(input) {
         ensured.push({ sessionKey: input.sessionKey, ...(input.cwd ? { cwd: input.cwd } : {}) });
@@ -642,7 +644,8 @@ describe('AcpxRuntimeAdapter boundary', () => {
           ...(input.cwd ? { cwd: input.cwd } : {}),
         };
       },
-      startTurn() {
+      startTurn(input) {
+        turns.push(input.text);
         return {
           events: {
             async *[Symbol.asyncIterator]() {
@@ -684,7 +687,51 @@ describe('AcpxRuntimeAdapter boundary', () => {
       sessionKey: checkpoint.sessionKey,
       cwd: process.cwd(),
     });
+    expect(turns).toEqual(['initial', 'continue']);
     expect(output).toBe('continued');
+  });
+
+  it('classifies usage limit failures as quota errors', async () => {
+    const runtime: AcpxRuntimeBoundary = {
+      async ensureSession(input) {
+        return { sessionKey: input.sessionKey, backend: 'fake', runtimeSessionName: 'fake' };
+      },
+      startTurn() {
+        return {
+          events: {
+            async *[Symbol.asyncIterator]() {
+              yield { type: 'done' as const };
+            },
+          },
+          result: Promise.resolve({
+            status: 'failed' as const,
+            error: { message: 'You have hit your usage limit. Please try again later.' },
+          }),
+          async cancel() {},
+        };
+      },
+    };
+    const adapter = new AcpxRuntimeAdapter({
+      id: 'quota-acpx',
+      agent: 'codex',
+      runtimeFactory: async () => runtime,
+      turnTimeoutMs: 1_000,
+    });
+    const session = await adapter.startSession({
+      runId: createRunId('quota-run'),
+      taskId: createTaskId('quota-task'),
+      workspaceId: createWorkspaceId(process.cwd()),
+      profile: { managed: true, id: 'codex', kind: 'codex' },
+      prompt: 'work',
+    });
+    const error = await new Promise<AcpClassifiedError>((resolve) => {
+      adapter.subscribe(session.id, (event) => {
+        if (event.state === 'failed') resolve(event.error as AcpClassifiedError);
+      });
+    });
+
+    expect(error).toBeInstanceOf(AcpClassifiedError);
+    expect(error.kind).toBe('quota');
   });
 });
 

@@ -248,6 +248,9 @@ export class DaemonLoop {
             ? { verificationGateSummary: outcome.verificationGateSummary }
             : {}),
           ...(outcome.evidenceRefs ? { evidenceRefs: outcome.evidenceRefs } : {}),
+          ...(outcome.evidenceAttestations
+            ? { evidenceAttestations: outcome.evidenceAttestations }
+            : {}),
           ...(outcome.verificationResults
             ? { verificationResults: outcome.verificationResults }
             : {}),

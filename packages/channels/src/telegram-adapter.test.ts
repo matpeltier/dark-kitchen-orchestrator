@@ -161,4 +161,91 @@ describe('TelegramChannelAdapter', () => {
     );
     await expect(adapter.connect()).rejects.toThrow(/HTTPS/);
   });
+
+  it('reconnects polling with bounded backoff after the bot dies', async () => {
+    vi.useFakeTimers();
+    try {
+      const deadBot = makeBot();
+      deadBot.start.mockRejectedValueOnce(new Error('polling loop crashed'));
+      const healthyBot = makeBot();
+      const bots = [deadBot.bot, healthyBot.bot];
+      let factoryCalls = 0;
+      const adapter = new TelegramChannelAdapter(
+        '123:secret',
+        { allowedChatIds: ['42'], reconnectBaseDelayMs: 10, reconnectMaxDelayMs: 20 },
+        async () => bots[factoryCalls++] ?? makeBot().bot,
+      );
+      try {
+        await adapter.connect();
+        expect(factoryCalls).toBe(1);
+
+        // The polling loop dies asynchronously.
+        await vi.advanceTimersByTimeAsync(0);
+        expect((await adapter.getStatus()).connected).toBe(false);
+
+        // First retry after the base delay, then success.
+        await vi.advanceTimersByTimeAsync(10);
+        expect(factoryCalls).toBe(2);
+        expect(healthyBot.start).toHaveBeenCalledWith({ drop_pending_updates: false });
+        expect((await adapter.getStatus()).connected).toBe(true);
+      } finally {
+        await adapter.disconnect();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up reconnecting after the bounded attempt count', async () => {
+    vi.useFakeTimers();
+    try {
+      const failing = makeBot();
+      failing.start.mockRejectedValue(new Error('still down'));
+      const adapter = new TelegramChannelAdapter(
+        '123:secret',
+        { allowedChatIds: ['42'], reconnectBaseDelayMs: 1, maxReconnectAttempts: 2 },
+        async () => failing.bot,
+      );
+      try {
+        await adapter.connect();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(1);
+        await vi.advanceTimersByTimeAsync(2);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(failing.start).toHaveBeenCalledTimes(3); // initial + 2 retries
+        expect((await adapter.getStatus()).connected).toBe(false);
+      } finally {
+        await adapter.disconnect();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reconnect after an explicit disconnect', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = makeBot();
+      let rejectStart: (error: Error) => void = () => {};
+      fake.start.mockImplementation(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectStart = reject;
+          }),
+      );
+      const adapter = new TelegramChannelAdapter(
+        '123:secret',
+        { allowedChatIds: ['42'], reconnectBaseDelayMs: 1 },
+        async () => fake.bot,
+      );
+      await adapter.connect();
+      await adapter.disconnect();
+      rejectStart(new Error('stopped'));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await adapter.getStatus()).connected).toBe(false);
+      await adapter.disconnect();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

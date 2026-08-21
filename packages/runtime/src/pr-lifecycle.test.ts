@@ -503,4 +503,87 @@ describe('PrLifecycleOrchestrator', () => {
     expect(result.state).toBe('merge-verification-failed');
     expect((await tracker.getTaskById(task.id))?.status).not.toBe('completed');
   });
+
+  it('refreshes the PR body with fresh proofs when reusing an existing PR', async () => {
+    const scm = makeScm();
+    const tracker = makeTracker();
+    const orch = new PrLifecycleOrchestrator(scm, tracker);
+    const task = await makeTask(tracker);
+    const updateSpy = vi.spyOn(scm, 'updatePullRequestBody');
+
+    const first = await orch.run(
+      {
+        taskId: task.id,
+        summary: 'first attempt',
+        repositoryTestsPassed: true,
+        reviewPassed: true,
+        commits: ['abc123'],
+        verificationResults: [
+          { profileId: 'web-e2e', status: 'passed', evidenceRefs: ['artifact:run-1'] },
+        ],
+      },
+      {
+        repositoryId: repoId,
+        sourceBranch: 'feat/reuse',
+        targetBranch: 'main',
+        autoMerge: false,
+      },
+    );
+    expect(first.state).toBe('awaiting-approval');
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(scm.lastPrBody).toContain('artifact:run-1');
+
+    const second = await orch.run(
+      {
+        taskId: task.id,
+        summary: 'second attempt',
+        repositoryTestsPassed: true,
+        reviewPassed: true,
+        commits: ['abc123'],
+        verificationResults: [
+          { profileId: 'web-e2e', status: 'passed', evidenceRefs: ['artifact:run-2'] },
+        ],
+      },
+      {
+        repositoryId: repoId,
+        sourceBranch: 'feat/reuse',
+        targetBranch: 'main',
+        autoMerge: false,
+      },
+    );
+    expect(second.state).toBe('awaiting-approval');
+    expect(second.pullRequestId).toBe(first.pullRequestId);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(scm.lastPrBody).toContain('artifact:run-2');
+    expect(scm.lastPrBody).not.toContain('artifact:run-1');
+  });
+
+  it('includes attested sha256 digests next to evidence refs in the PR body', async () => {
+    const scm = makeScm();
+    const tracker = makeTracker();
+    const orch = new PrLifecycleOrchestrator(scm, tracker);
+    const task = await makeTask(tracker);
+    const result = await orch.run(
+      {
+        taskId: task.id,
+        summary: 'attested evidence',
+        repositoryTestsPassed: true,
+        reviewPassed: true,
+        commits: ['abc123'],
+        evidenceRefs: ['artifacts/shot.png', 'artifacts/unreadable.png'],
+        evidenceAttestations: {
+          'artifacts/shot.png': 'sha256:deadbeef',
+        },
+      },
+      {
+        repositoryId: repoId,
+        sourceBranch: 'feat/attested',
+        targetBranch: 'main',
+        autoMerge: false,
+      },
+    );
+    expect(result.state).toBe('awaiting-approval');
+    expect(scm.lastPrBody).toContain('- artifacts/shot.png — sha256:deadbeef');
+    expect(scm.lastPrBody).toContain('- artifacts/unreadable.png');
+  });
 });

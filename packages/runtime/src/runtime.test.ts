@@ -363,4 +363,45 @@ describe('SqliteDurableJournal', () => {
     expect(step2Calls).toBe(1); // executed for first time
     journal.close();
   });
+
+  it('persists, overwrites, and clears in-flight checkpoints', async () => {
+    const journal = new SqliteDurableJournal(':memory:', 'run-inflight');
+    expect(await journal.getInFlight('step-1')).toBeUndefined();
+
+    await journal.markInFlight('step-1', { sessionKey: 's-1' });
+    expect(await journal.getInFlight('step-1')).toEqual({ sessionKey: 's-1' });
+
+    await journal.markInFlight('step-1', { sessionKey: 's-2' });
+    expect(await journal.getInFlight('step-1')).toEqual({ sessionKey: 's-2' });
+
+    await journal.clearInFlight('step-1');
+    expect(await journal.getInFlight('step-1')).toBeUndefined();
+    await journal.clearInFlight('step-1');
+    expect(await journal.getInFlight('step-1')).toBeUndefined();
+    journal.close();
+  });
+
+  it('offers a crash-recovery checkpoint to the next run exactly once', async () => {
+    const journal = new SqliteDurableJournal(':memory:', 'run-crash-ckpt');
+    await journal.markInFlight('run-crash-ckpt/agent:impl', { sessionKey: 'interrupted' });
+    const seenCheckpoints: unknown[] = [];
+    const resolver = (role: string) => async (input: { resumeCheckpoint?: unknown }) => {
+      if (role === 'impl') {
+        seenCheckpoints.push(input.resumeCheckpoint);
+        return 'resumed';
+      }
+      return 'unknown';
+    };
+
+    const result = await runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'p' }), {
+      runId: 'run-crash-ckpt',
+      journal,
+      resolver,
+    });
+
+    expect(result.result).toBe('resumed');
+    expect(seenCheckpoints).toEqual([{ sessionKey: 'interrupted' }]);
+    expect(await journal.getInFlight('run-crash-ckpt/agent:impl')).toBeUndefined();
+    journal.close();
+  });
 });

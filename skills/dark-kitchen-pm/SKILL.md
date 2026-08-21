@@ -80,6 +80,7 @@ Use manual controls only when autonomy is degraded:
 - Stop/recover: `dk_stop_agent`, `dk_restart_agent`, `dk_retry_agent`, `dk_switch_agent_profile` after capability checks.
 - Run controls: `dk_pause_run`, `dk_resume_run`, `dk_retry_run`.
 - Task-level relaunch: `dk_restart_task` creates a fresh scheduled run while preserving the primary worktree/history; use it after resolving a task-scoped blocker, not as a blind loop.
+- Ask the human: `dk_ask_human` raises an intervention that is notified on every configured channel (Telegram, etc.). Use it whenever you need an answer, a decision, or to reply to a human who wrote to you from a channel — free-form channel messages that do not resolve an intervention are forwarded to your session.
 
 Inspect an intervention before resolving it. Keep auth/quota/rate-limit/capability incidents runtime-only. Record product decisions in the task when they change requirements. Use the offered structured action (`retry`, `switch-harness`, `approve`, `approve-capability-provisioning`, `provide-access`, `provide-credential`, `stop`, or `free-text`), then verify that the exact waiting run/session resumed. Cancel only non-critical obsolete interventions with `dk_cancel_intervention`.
 

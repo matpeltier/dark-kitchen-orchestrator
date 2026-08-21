@@ -321,6 +321,100 @@ describe('retry', () => {
   });
 });
 
+// ─── In-flight checkpoints ────────────────────────────────────────────────────
+
+describe('in-flight checkpoints', () => {
+  it('clears the in-flight entry after a successful step', async () => {
+    const journal = new InMemoryJournal();
+    let checkpointDuringRun: unknown = 'unset';
+    const resolver = makeResolver({
+      impl: async (input) => {
+        await input.onCheckpoint?.({ sessionKey: 's-1' });
+        checkpointDuringRun = await journal.getInFlight('run-ckpt/agent:impl');
+        return 'ok';
+      },
+    });
+
+    const result = await runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'x' }), {
+      runId: 'run-ckpt',
+      journal,
+      resolver,
+    });
+
+    expect(result.result).toBe('ok');
+    expect(checkpointDuringRun).toEqual({ sessionKey: 's-1' });
+    expect(await journal.getInFlight('run-ckpt/agent:impl')).toBeUndefined();
+  });
+
+  it('offers a stored checkpoint to the first attempt only and purges it once consumed', async () => {
+    const journal = new InMemoryJournal();
+    await journal.markInFlight('run-resume/agent:impl', { sessionKey: 'interrupted' });
+    const seenCheckpoints: unknown[] = [];
+    let attempts = 0;
+    const resolver = makeResolver({
+      impl: async (input) => {
+        attempts++;
+        seenCheckpoints.push(input.resumeCheckpoint);
+        if (attempts < 2) throw new Error('transient');
+        return 'ok';
+      },
+    });
+
+    const result = await runWorkflow(
+      async (b) => b.agent({ role: 'impl', prompt: 'x', retryPolicy: { maxAttempts: 2 } }),
+      { runId: 'run-resume', journal, resolver },
+    );
+
+    expect(result.result).toBe('ok');
+    expect(seenCheckpoints).toEqual([{ sessionKey: 'interrupted' }, undefined]);
+    expect(await journal.getInFlight('run-resume/agent:impl')).toBeUndefined();
+  });
+
+  it('purges the in-flight entry on definitive failure', async () => {
+    const journal = new InMemoryJournal();
+    const resolver = makeResolver({
+      impl: async (input) => {
+        await input.onCheckpoint?.({ sessionKey: 'doomed' });
+        throw new Error('fatal');
+      },
+    });
+
+    await expect(
+      runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'x' }), {
+        runId: 'run-fail',
+        journal,
+        resolver,
+      }),
+    ).rejects.toBeInstanceOf(WorkflowAgentError);
+
+    expect(await journal.getInFlight('run-fail/agent:impl')).toBeUndefined();
+  });
+
+  it('purges the in-flight entry on cancellation', async () => {
+    const controller = new AbortController();
+    const journal = new InMemoryJournal();
+    const resolver = makeResolver({
+      impl: async (input, signal) => {
+        await input.onCheckpoint?.({ sessionKey: 'cancelled-session' });
+        return new Promise<never>((_, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      },
+    });
+
+    const promise = runWorkflow(async (b) => b.agent({ role: 'impl', prompt: 'x' }), {
+      runId: 'run-cancel-ckpt',
+      journal,
+      resolver,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+
+    await expect(promise).rejects.toBeInstanceOf(WorkflowCancelledError);
+    expect(await journal.getInFlight('run-cancel-ckpt/agent:impl')).toBeUndefined();
+  });
+});
+
 // ─── Cancellation ─────────────────────────────────────────────────────────────
 
 describe('cancellation', () => {

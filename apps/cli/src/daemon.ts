@@ -32,6 +32,7 @@ import {
 } from '@dark-kitchen/runtime';
 import { ChannelGateway, UnifiedChannelTransport, interventionCode } from '@dark-kitchen/channels';
 import type { UnifiedChannelConfig } from '@dark-kitchen/channels';
+import { resolutionAck, routeFreeChatToPm } from './channel-fallback.js';
 import { ConfigStore } from '@dark-kitchen/config';
 import type { DarkKitchenConfig } from '@dark-kitchen/config';
 import { createInterventionId, createTaskId } from '@dark-kitchen/core';
@@ -241,6 +242,13 @@ export class DarkKitchenDaemon {
               action,
               answer: switchMatch?.[1] ?? reply.body,
             });
+            await this.channelGateway?.notify(
+              {
+                address: reply.address,
+                body: resolutionAck(action, String(resolved.targetId)),
+              },
+              reply.transportId,
+            );
           }
         } catch (error) {
           this.log(
@@ -259,6 +267,20 @@ export class DarkKitchenDaemon {
         }
       });
 
+      // Free-form chat: messages that do not resolve to a pending
+      // intervention are forwarded to the active PM session.
+      this.channelGateway.onUnmatchedMessage(async (message, transportId) => {
+        await routeFreeChatToPm({
+          body: message.body,
+          ...(message.senderId ? { senderId: message.senderId } : {}),
+          ...(this.agentControls ? { agentControls: this.agentControls } : {}),
+          notify: async (body) => {
+            await this.channelGateway?.notify({ address: message.address, body }, transportId);
+          },
+          log: (level, msg) => this.log(level, msg),
+        });
+      });
+
       // Notify every configured channel when an intervention is created.
       this.interventionService.subscribe(async (event) => {
         if (event.type !== 'intervention.created') return;
@@ -273,6 +295,29 @@ export class DarkKitchenDaemon {
           });
         }
       });
+
+      // Replay notifications for interventions still open after a restart so
+      // the human does not depend on the MCP to discover them.
+      const openInterventions = (await this.interventionService.list()).filter(
+        (intervention) => intervention.status === 'open' || intervention.status === 'acknowledged',
+      );
+      for (const intervention of openInterventions) {
+        for (const ch of configuredChannels) {
+          await this.channelGateway.notify(
+            {
+              address: { channel: ch.kind, conversationId: ch.defaultTarget ?? '' },
+              body: formatInterventionNotification(intervention),
+              actions: interventionActions(intervention),
+              interventionId: intervention.id,
+            },
+            undefined,
+            { replay: true },
+          );
+        }
+      }
+      if (openInterventions.length > 0) {
+        this.log('info', `Replayed ${openInterventions.length} open intervention(s)`);
+      }
 
       transport.start().catch((err: unknown) => {
         this.log('warn', `Channel transport start failed: ${String(err)}`);
@@ -1187,6 +1232,9 @@ export class DarkKitchenDaemon {
           workspacePath?: string;
           runId?: string;
           taskId?: string;
+          callKey?: string;
+          resumeCheckpoint?: unknown;
+          onCheckpoint?: (checkpoint: unknown) => void | Promise<void>;
           runtimeResources?: {
             skills?: readonly string[];
             mcpServers?: readonly string[];
@@ -1255,10 +1303,19 @@ export class DarkKitchenDaemon {
         };
         if (instructions) Object.assign(sessionInput, { instructions });
 
-        // Start the session first so we can subscribe to the *returned* session
-        // id (the adapter generates its own id internally). Subscribing to a
-        // pre-guessed id would never receive any events.
-        const session = await runtime.startSession(sessionInput);
+        // Reattach an interrupted persistent session when the journal offered
+        // a checkpoint; otherwise start fresh. Subscribe to the *returned*
+        // session id (the adapter generates its own id internally).
+        const restoredSession =
+          input.resumeCheckpoint !== undefined && runtime.restoreSession
+            ? await runtime.restoreSession(input.resumeCheckpoint)
+            : undefined;
+        const session = restoredSession ?? (await runtime.startSession(sessionInput));
+
+        // Persist a restart-safe checkpoint so a later resume can reattach.
+        if (input.callKey && input.onCheckpoint && runtime.checkpointSession) {
+          await input.onCheckpoint(runtime.checkpointSession(session.id));
+        }
 
         // Persist the session record so the PM control plane can list it.
         const sessionId = session.id as import('@dark-kitchen/core').AgentSessionId;
@@ -1293,6 +1350,12 @@ export class DarkKitchenDaemon {
         } catch (error) {
           await runtime.stopSession(sessionId).catch(() => undefined);
           throw error;
+        }
+
+        // A restored session does not auto-send a turn; re-issue the augmented
+        // prompt so the same session continues from its preserved context.
+        if (restoredSession) {
+          await runtime.sendPrompt(session.id as never, sessionInput.prompt);
         }
 
         return new Promise<string>((resolvePromise, reject) => {

@@ -22,6 +22,12 @@ export interface AgentCallInput {
   readonly runId?: string;
   /** Task identifier (used to key persistent agent sessions per task). */
   readonly taskId?: string;
+  /** Stable engine identity for this call (used to persist session checkpoints). */
+  readonly callKey?: string;
+  /** Session checkpoint from an interrupted previous attempt, if any. */
+  readonly resumeCheckpoint?: unknown;
+  /** Report a restart-safe session checkpoint once the session exists. */
+  readonly onCheckpoint?: (checkpoint: unknown) => void | Promise<void>;
 }
 
 export interface AgentCallOutput {
@@ -76,6 +82,14 @@ export interface JournalStore {
    * from an absent entry. Existing durable journals can omit it.
    */
   has?(callKey: string): boolean | Promise<boolean>;
+  /**
+   * Optional in-flight tracking for crash recovery. A checkpoint recorded
+   * before the harness turn completes is offered back to the resolver on the
+   * next attempt so a persistent session can be reattached mid-run.
+   */
+  markInFlight?(callKey: string, checkpoint: unknown): Promise<void>;
+  getInFlight?(callKey: string): Promise<unknown | undefined>;
+  clearInFlight?(callKey: string): Promise<void>;
 }
 
 export interface RetryPolicy {
