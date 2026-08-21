@@ -495,6 +495,7 @@ function normalizePullRequest(
     html_url: string;
     merged?: boolean | null;
     merged_at?: string | null;
+    mergeable?: boolean | null;
   },
   owner: string,
   repo: string,
@@ -512,6 +513,12 @@ function normalizePullRequest(
     sourceBranch: data.head.ref,
     targetBranch: data.base.ref,
     headSha: data.head.sha,
+    ...(data.mergeable === undefined
+      ? {}
+      : {
+          mergeability:
+            data.mergeable === false ? ('conflicting' as const) : ('mergeable' as const),
+        }),
     reference: { provider: PROVIDER, id: String(data.number), url: data.html_url },
   };
 }

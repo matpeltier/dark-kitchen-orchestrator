@@ -315,6 +315,21 @@ export class PrLifecycleOrchestrator {
       const maxAttempts = Math.max(1, options.externalFixPolls ?? 3);
       let lastHeadSha: string | undefined;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        // Conflicting branches can never report required checks (GitHub skips
+        // pull_request workflows when the merge ref cannot be built), so probe
+        // mergeability before waiting on CI.
+        let currentPr = pr;
+        try {
+          currentPr = await this.scm.getPullRequest(options.repositoryId, pr.id);
+        } catch {
+          // Keep the creation-time snapshot; the checks poll will surface errors.
+        }
+        if (currentPr.mergeability === 'conflicting') {
+          const conflictResult = await this.handleConflict(options, pr.id, attempt, maxAttempts);
+          if (conflictResult) return conflictResult;
+          continue;
+        }
+
         // Poll checks. Network/timeouts become recoverable lifecycle state
         // rather than escaping and losing the run's PR/evidence context.
         let checks;
@@ -413,38 +428,15 @@ export class PrLifecycleOrchestrator {
         } catch (err) {
           const message = safeErrorMessage(err);
           if (/conflict/i.test(message)) {
-            // With worktree access, attempt a bounded automatic base-branch
-            // merge in the task worktree; a trivial merge is pushed and the
-            // cycle re-runs.
-            if (options.worktreePath && attempt < maxAttempts - 1) {
-              const outcome = await mergeBaseIntoBranch(
-                options.worktreePath,
-                options.pushRemote ?? 'origin',
-                options.targetBranch,
-                options.sourceBranch,
-                options.pushToken,
-              );
-              if (outcome === 'merged') continue;
-              return {
-                pullRequestId: pr.id,
-                merged: false,
-                trackerClosed: false,
-                worktreeReleased: false,
-                state: 'merge-conflict',
-                errorMessage:
-                  outcome === 'conflict'
-                    ? `Merge conflict with ${options.targetBranch} could not be resolved automatically`
-                    : message,
-              };
-            }
-            return {
-              pullRequestId: pr.id,
-              merged: false,
-              trackerClosed: false,
-              worktreeReleased: false,
-              state: 'merge-conflict',
-              errorMessage: message,
-            };
+            const conflictResult = await this.handleConflict(
+              options,
+              pr.id,
+              attempt,
+              maxAttempts,
+              message,
+            );
+            if (conflictResult) return conflictResult;
+            continue;
           }
           return {
             pullRequestId: pr.id,
@@ -532,6 +524,50 @@ export class PrLifecycleOrchestrator {
 
   private async closeTrackerTask(taskId: TaskId): Promise<void> {
     await this.tracker.updateTask(taskId, { status: 'completed' });
+  }
+
+  /**
+   * Shared conflict handling: with worktree access, attempt a bounded
+   * automatic base-branch merge (trivial merges are pushed and the caller
+   * re-runs the cycle). Returns the terminal merge-conflict lifecycle result,
+   * or null when the caller should continue the loop.
+   */
+  private async handleConflict(
+    options: PrLifecycleOptions,
+    pullRequestId: PullRequestId,
+    attempt: number,
+    maxAttempts: number,
+    message = `Merge conflict with ${options.targetBranch} detected`,
+  ): Promise<PrLifecycleResult | null> {
+    if (options.worktreePath && attempt < maxAttempts - 1) {
+      const outcome = await mergeBaseIntoBranch(
+        options.worktreePath,
+        options.pushRemote ?? 'origin',
+        options.targetBranch,
+        options.sourceBranch,
+        options.pushToken,
+      );
+      if (outcome === 'merged') return null;
+      return {
+        pullRequestId,
+        merged: false,
+        trackerClosed: false,
+        worktreeReleased: false,
+        state: 'merge-conflict',
+        errorMessage:
+          outcome === 'conflict'
+            ? `Merge conflict with ${options.targetBranch} could not be resolved automatically`
+            : message,
+      };
+    }
+    return {
+      pullRequestId,
+      merged: false,
+      trackerClosed: false,
+      worktreeReleased: false,
+      state: 'merge-conflict',
+      errorMessage: message,
+    };
   }
 }
 

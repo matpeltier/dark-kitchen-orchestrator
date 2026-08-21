@@ -226,6 +226,12 @@ export interface PullRequest {
   readonly targetBranch: string;
   /** Current source commit used for compare-and-merge protection when available. */
   readonly headSha?: string;
+  /**
+   * SCM-computed mergeability. `conflicting` means the source branch cannot be
+   * merged into the target without manual resolution — required CI checks will
+   * typically never report in this state.
+   */
+  readonly mergeability?: 'mergeable' | 'conflicting' | 'unknown';
   readonly reference: ScmReference;
   readonly url?: string;
 }
