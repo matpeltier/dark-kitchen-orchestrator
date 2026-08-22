@@ -809,3 +809,41 @@ describe('MCP tool handler - task lifecycle', () => {
     expect(data.state).toBe('unknown');
   });
 });
+
+describe('MCP tool handler - session transcript', () => {
+  it('returns transcript entries for a session, newest last', async () => {
+    const events = [
+      {
+        id: createEventId('evt-t1'),
+        type: 'agent-session.transcript',
+        occurredAt: '2026-08-22T08:00:00Z',
+        payload: {
+          agentSessionId: 'sess-1',
+          taskId: 't-1',
+          state: 'completed',
+          output: 'wrote src/notes.js',
+        },
+      },
+      {
+        id: createEventId('evt-t2'),
+        type: 'agent-session.transcript',
+        occurredAt: '2026-08-22T08:01:00Z',
+        payload: { agentSessionId: 'sess-other', state: 'failed', error: 'boom' },
+      },
+    ];
+    const store = {
+      listEvents: async (options?: { type?: string }) =>
+        options?.type === 'agent-session.transcript' ? events : [],
+    } as unknown as RuntimeStore;
+    const result = await handleTool(
+      'dk_get_session_transcript',
+      { sessionId: 'sess-1' },
+      { store },
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const data = result.data as { entries: { output: string | null }[] };
+    expect(data.entries).toHaveLength(1);
+    expect(data.entries[0]?.output).toContain('notes.js');
+  });
+});

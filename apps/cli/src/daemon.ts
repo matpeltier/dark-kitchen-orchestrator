@@ -20,6 +20,8 @@
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { createEventId } from '@dark-kitchen/core';
 import { controlArgument, defineProcess, executeProcess } from '@dark-kitchen/process-execution';
 import { SqliteRuntimeStore } from '@dark-kitchen/runtime-store-sqlite';
 import {
@@ -1470,6 +1472,33 @@ export class DarkKitchenDaemon {
           runtime.subscribe(
             session.id as never,
             (event: { state: string; output?: string; error?: unknown }) => {
+              // Persist a durable transcript entry so PM clients can explain
+              // what an agent did without terminal access. Best-effort.
+              if (event.output !== undefined || event.error !== undefined) {
+                void this.store
+                  ?.appendEvent({
+                    id: createEventId(`evt-${randomUUID()}`),
+                    type: 'agent-session.transcript',
+                    occurredAt: new Date().toISOString(),
+                    payload: {
+                      agentSessionId: sessionId,
+                      ...(input.taskId
+                        ? { taskId: input.taskId as import('@dark-kitchen/core').TaskId }
+                        : {}),
+                      ...(input.runId
+                        ? { runId: input.runId as import('@dark-kitchen/core').RunId }
+                        : {}),
+                      state: event.state,
+                      ...(event.output !== undefined
+                        ? { output: event.output.slice(0, 16_000) }
+                        : {}),
+                      ...(event.error !== undefined
+                        ? { error: String(event.error).slice(0, 4_000) }
+                        : {}),
+                    },
+                  })
+                  .catch(() => {});
+              }
               if (event.state === 'completed') {
                 void this.updateSessionState(sessionId, 'completed');
                 settle(() => resolvePromise(event.output ?? ''));

@@ -771,6 +771,20 @@ export const PM_CONTROL_TOOLS: McpToolDescriptor[] = [
     },
   },
   {
+    name: 'dk_get_session_transcript',
+    description:
+      'Durable transcript entries (agent outputs/errors) for an agent session, newest last. Use it to explain what an agent actually did without terminal access. Find session ids via dk_list_agents or dk_get_run.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: NON_EMPTY_STRING_SCHEMA,
+        limit: { type: 'integer', minimum: 1, maximum: 200 },
+      },
+      required: ['sessionId'],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: 'dk_get_task_lifecycle',
     description:
       'Latest PR lifecycle state for a task: lifecycle state (pr-created, checks-failed, merge-conflict, merged, ...), error message when failed, and pull request URL. Answers "where is my PR?" without SCM access.',
@@ -1494,6 +1508,33 @@ export async function handlePmTool(
         // daemon loop re-schedules the task on the next tick.
         await ctx.tracker?.updateTask(taskId, { status: 'ready' });
         return ok({ restarted: true, taskId });
+      }
+
+      case 'dk_get_session_transcript': {
+        if (!ctx.store) return err('No runtime store configured');
+        const wanted = String(args['sessionId']);
+        const rawLimit = Number(args['limit'] ?? 50);
+        const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 50;
+        const events = await ctx.store.listEvents({
+          type: 'agent-session.transcript',
+          limit: 500,
+        });
+        const entries = events
+          .filter(
+            (event): event is DomainEventOfType<'agent-session.transcript'> =>
+              event.type === 'agent-session.transcript' &&
+              String(event.payload.agentSessionId) === wanted,
+          )
+          .slice(-limit)
+          .map((event) => ({
+            occurredAt: event.occurredAt,
+            state: event.payload.state,
+            output: event.payload.output ?? null,
+            error: event.payload.error ?? null,
+            taskId: event.payload.taskId ?? null,
+            runId: event.payload.runId ?? null,
+          }));
+        return ok({ sessionId: wanted, entries });
       }
 
       case 'dk_get_task_lifecycle': {

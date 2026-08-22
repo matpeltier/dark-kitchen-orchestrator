@@ -127,6 +127,18 @@ export type TaskLifecycleEvent = TypedDomainEvent<
   }
 >;
 
+export type AgentSessionTranscriptEvent = TypedDomainEvent<
+  'agent-session.transcript',
+  {
+    readonly agentSessionId: import('./domain.js').AgentSessionId;
+    readonly taskId?: TaskId;
+    readonly runId?: RunId;
+    readonly state: string;
+    readonly output?: string;
+    readonly error?: string;
+  }
+>;
+
 export type PullRequestStateChangedEvent = TypedDomainEvent<
   'pull-request.state-changed',
   {
@@ -168,6 +180,7 @@ export type DomainEvent =
   | InterventionCreatedEvent
   | InterventionStateChangedEvent
   | TaskLifecycleEvent
+  | AgentSessionTranscriptEvent
   | PullRequestStateChangedEvent
   | CheckStateChangedEvent
   | ConfigurationChangedEvent;

@@ -77,6 +77,7 @@ Use manual controls only when autonomy is degraded:
 
 - Inspect: `dk_list_runs`, `dk_get_run`, `dk_list_agents`, `dk_get_agent`, and verification tools.
 - PR visibility: `dk_get_task_lifecycle` returns the latest PR lifecycle state for a task (`pr-created`, `checks-failed`, `merge-conflict`, `merged`, ...), the failure reason, and the pull request URL — use it to answer "where is my PR?" without SCM access.
+- Agent transparency: `dk_get_session_transcript` returns the durable outputs/errors of an agent session (session ids via `dk_list_agents` or `dk_get_run`) — use it to explain what an agent actually did without terminal access.
 - Steer a capable active session: `dk_send_instruction`; use `dk_interrupt_agent` only when immediate redirection is necessary.
 - Stop/recover: `dk_stop_agent`, `dk_restart_agent`, `dk_retry_agent`, `dk_switch_agent_profile` after capability checks.
 - Run controls: `dk_pause_run`, `dk_resume_run`, `dk_retry_run`.
