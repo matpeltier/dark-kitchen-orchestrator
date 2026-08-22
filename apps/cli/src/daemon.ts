@@ -443,7 +443,19 @@ export class DarkKitchenDaemon {
           capabilities: capabilityService,
           verification: verificationService,
         },
-        { port: parseInt(process.env['DK_MCP_PORT'] ?? '18801', 10) },
+        {
+          port: parseInt(process.env['DK_MCP_PORT'] ?? '18801', 10),
+          ...(process.env['DK_MCP_HOST'] ? { host: process.env['DK_MCP_HOST'] } : {}),
+          ...(process.env['DK_MCP_TOKEN'] ? { authToken: process.env['DK_MCP_TOKEN'] } : {}),
+          ...(process.env['DK_MCP_ALLOWED_HOSTS']
+            ? {
+                allowedHosts: process.env['DK_MCP_ALLOWED_HOSTS']
+                  .split(',')
+                  .map((entry) => entry.trim())
+                  .filter(Boolean),
+              }
+            : {}),
+        },
       );
       this.mcpHttpUrl = this.mcpHttpServer.url;
       this.log('info', `MCP (agents + PM): ${this.mcpHttpUrl}`);

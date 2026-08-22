@@ -288,19 +288,22 @@ Config version 0 (no `version` field) migrates to version 1 on read. Runtime SQL
 
 ## Environment variables
 
-| Variable                             | Used for                                                                                |
-| ------------------------------------ | --------------------------------------------------------------------------------------- |
-| `GITHUB_TOKEN`                       | Example GitHub Issues and GitHub SCM credential. The actual name comes from `tokenEnv`. |
-| `LINEAR_API_KEY`                     | Example Linear credential.                                                              |
-| `JIRA_TOKEN`, `JIRA_EMAIL`           | Jira API credential and account email.                                                  |
-| `TELEGRAM_BOT_TOKEN`                 | Telegram bot token.                                                                     |
-| `TELEGRAM_WEBHOOK_SECRET`            | Example Telegram webhook secret; actual name comes from `webhookSecretEnv`.             |
-| `DISCORD_BOT_TOKEN`                  | Discord bot token.                                                                      |
-| `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | Slack bot and Socket Mode tokens.                                                       |
-| `DSH_EXECUTABLE`                     | Optional reviewed path/name for the user-managed DeepSeek Harness executable.           |
-| `DK_DASHBOARD_PORT`                  | Dashboard/SSE port; default `18800`.                                                    |
-| `DK_MCP_PORT`                        | daemon HTTP MCP port; default `18801`.                                                  |
-| `DK_NO_DASHBOARD`                    | Any non-empty value disables the dashboard listener.                                    |
-| `OPENCLAW_URL`                       | Optional `doctor` health probe for an externally managed OpenClaw gateway.              |
+| Variable                             | Used for                                                                                                                                                           |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GITHUB_TOKEN`                       | Example GitHub Issues and GitHub SCM credential. The actual name comes from `tokenEnv`.                                                                            |
+| `LINEAR_API_KEY`                     | Example Linear credential.                                                                                                                                         |
+| `JIRA_TOKEN`, `JIRA_EMAIL`           | Jira API credential and account email.                                                                                                                             |
+| `TELEGRAM_BOT_TOKEN`                 | Telegram bot token.                                                                                                                                                |
+| `TELEGRAM_WEBHOOK_SECRET`            | Example Telegram webhook secret; actual name comes from `webhookSecretEnv`.                                                                                        |
+| `DISCORD_BOT_TOKEN`                  | Discord bot token.                                                                                                                                                 |
+| `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | Slack bot and Socket Mode tokens.                                                                                                                                  |
+| `DSH_EXECUTABLE`                     | Optional reviewed path/name for the user-managed DeepSeek Harness executable.                                                                                      |
+| `DK_DASHBOARD_PORT`                  | Dashboard/SSE port; default `18800`.                                                                                                                               |
+| `DK_MCP_PORT`                        | daemon HTTP MCP port; default `18801`.                                                                                                                             |
+| `DK_MCP_HOST`                        | daemon HTTP MCP bind address; default `127.0.0.1`. Set `0.0.0.0` (or a Tailscale IP) to serve remote clients — requires `DK_MCP_TOKEN` and `DK_MCP_ALLOWED_HOSTS`. |
+| `DK_MCP_TOKEN`                       | Bearer token required by non-loopback MCP bindings.                                                                                                                |
+| `DK_MCP_ALLOWED_HOSTS`               | Comma-separated Host header allowlist for non-loopback MCP bindings (e.g. `host.tailnet-name.ts.net,100.x.y.z`).                                                   |
+| `DK_NO_DASHBOARD`                    | Any non-empty value disables the dashboard listener.                                                                                                               |
+| `OPENCLAW_URL`                       | Optional `doctor` health probe for an externally managed OpenClaw gateway.                                                                                         |
 
 `.dark-kitchen/.env` is a convention only; the process manager or shell must load it. Keep it out of Git.
