@@ -21,6 +21,7 @@ import {
   createProjectId,
   createTaskId,
   createInterventionId,
+  type DomainEventOfType,
 } from '@dark-kitchen/core';
 import { dirname } from 'node:path';
 import { zodSchemaFromJsonSchema } from './schema.js';
@@ -770,6 +771,17 @@ export const PM_CONTROL_TOOLS: McpToolDescriptor[] = [
     },
   },
   {
+    name: 'dk_get_task_lifecycle',
+    description:
+      'Latest PR lifecycle state for a task: lifecycle state (pr-created, checks-failed, merge-conflict, merged, ...), error message when failed, and pull request URL. Answers "where is my PR?" without SCM access.',
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: NON_EMPTY_STRING_SCHEMA },
+      required: ['taskId'],
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
     name: 'dk_get_scheduler_status',
     description: 'Current scheduler state: active runs, paused tasks, completed tasks.',
     inputSchema: { type: 'object', properties: {}, required: [] },
@@ -1482,6 +1494,33 @@ export async function handlePmTool(
         // daemon loop re-schedules the task on the next tick.
         await ctx.tracker?.updateTask(taskId, { status: 'ready' });
         return ok({ restarted: true, taskId });
+      }
+
+      case 'dk_get_task_lifecycle': {
+        if (!ctx.store) return err('No runtime store configured');
+        const events = await ctx.store.listEvents({
+          type: 'task.lifecycle',
+          limit: 200,
+        });
+        const wanted = String(args['taskId']);
+        const latest = [...events]
+          .reverse()
+          .find(
+            (event): event is DomainEventOfType<'task.lifecycle'> =>
+              event.type === 'task.lifecycle' && event.payload.taskId === wanted,
+          );
+        return ok(
+          latest
+            ? {
+                taskId: latest.payload.taskId,
+                state: latest.payload.state,
+                errorMessage: latest.payload.errorMessage ?? null,
+                pullRequestUrl: latest.payload.pullRequestUrl ?? null,
+                sourceBranch: latest.payload.sourceBranch ?? null,
+                occurredAt: latest.occurredAt,
+              }
+            : { taskId: wanted, state: 'unknown' },
+        );
       }
 
       case 'dk_get_scheduler_status': {

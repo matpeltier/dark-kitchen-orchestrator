@@ -14,6 +14,7 @@ import {
 } from './tools.js';
 import { MockTrackerAdapter } from '@dark-kitchen/tracker';
 import {
+  createEventId,
   createProjectId,
   createRunId,
   createAgentSessionId,
@@ -762,5 +763,49 @@ describe('MCP tool handler - PM control plane', () => {
     expect(
       await handleTool('dk_retry_run', { runId: 'run-1' }, { store, supervisor }),
     ).toMatchObject({ success: false, code: 'service_unavailable' });
+  });
+});
+
+describe('MCP tool handler - task lifecycle', () => {
+  it('returns the latest lifecycle event for a task', async () => {
+    const events: unknown[] = [
+      {
+        id: createEventId('evt-1'),
+        type: 'task.lifecycle',
+        occurredAt: '2026-08-22T08:00:00Z',
+        payload: {
+          taskId: 't-1',
+          state: 'merge-conflict',
+          errorMessage: 'conflict with main',
+          pullRequestId: 'github:org/repo#6',
+          pullRequestUrl: 'https://github.com/org/repo/pull/6',
+          sourceBranch: 'dk/branch',
+        },
+      },
+      {
+        id: createEventId('evt-2'),
+        type: 'task.lifecycle',
+        occurredAt: '2026-08-22T09:00:00Z',
+        payload: { taskId: 't-1', state: 'merged', sourceBranch: 'dk/branch' },
+      },
+    ];
+    const store = {
+      listEvents: async (options?: { type?: string }) =>
+        options?.type === 'task.lifecycle' ? events : [],
+    } as unknown as RuntimeStore;
+    const result = await handleTool('dk_get_task_lifecycle', { taskId: 't-1' }, { store });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const data = result.data as { state: string };
+    expect(data.state).toBe('merged');
+  });
+
+  it('reports unknown when no lifecycle event exists', async () => {
+    const store = { listEvents: async () => [] } as unknown as RuntimeStore;
+    const result = await handleTool('dk_get_task_lifecycle', { taskId: 't-x' }, { store });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const data = result.data as { state: string };
+    expect(data.state).toBe('unknown');
   });
 });

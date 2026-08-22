@@ -115,6 +115,18 @@ export type InterventionStateChangedEvent = TypedDomainEvent<
   }
 >;
 
+export type TaskLifecycleEvent = TypedDomainEvent<
+  'task.lifecycle',
+  {
+    readonly taskId: TaskId;
+    readonly state: string;
+    readonly errorMessage?: string;
+    readonly pullRequestId?: PullRequestId;
+    readonly pullRequestUrl?: string;
+    readonly sourceBranch?: string;
+  }
+>;
+
 export type PullRequestStateChangedEvent = TypedDomainEvent<
   'pull-request.state-changed',
   {
@@ -155,6 +167,7 @@ export type DomainEvent =
   | AgentControlEvent
   | InterventionCreatedEvent
   | InterventionStateChangedEvent
+  | TaskLifecycleEvent
   | PullRequestStateChangedEvent
   | CheckStateChangedEvent
   | ConfigurationChangedEvent;

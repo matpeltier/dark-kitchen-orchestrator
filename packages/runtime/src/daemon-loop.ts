@@ -14,7 +14,7 @@ import type {
   RunId,
   RuntimeStore,
 } from '@dark-kitchen/core';
-import { createRunId } from '@dark-kitchen/core';
+import { createEventId, createRunId } from '@dark-kitchen/core';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { WorkflowAgentError } from '@dark-kitchen/workflow-engine';
@@ -302,6 +302,33 @@ export class DaemonLoop {
         },
         this.deps.releaseWorktree,
       );
+
+      // Persist the lifecycle outcome so PM clients can answer "where is my
+      // PR?" without SCM access.
+      try {
+        const prId = lifecycleResult.pullRequestId;
+        const prNumber = prId ? Number(String(prId).split('#')[1] ?? NaN) : NaN;
+        const prBase = prId ? String(prId).split('#')[0] : undefined;
+        await this.deps.store?.appendEvent({
+          id: createEventId(`evt-${randomUUID()}`),
+          type: 'task.lifecycle',
+          occurredAt: new Date().toISOString(),
+          payload: {
+            taskId,
+            state: lifecycleResult.state,
+            ...(lifecycleResult.errorMessage ? { errorMessage: lifecycleResult.errorMessage } : {}),
+            ...(prId && !Number.isNaN(prNumber)
+              ? {
+                  pullRequestId: prId,
+                  pullRequestUrl: `${prBase?.replace(/^github:/, 'https://github.com/')}/pull/${prNumber}`,
+                }
+              : {}),
+            sourceBranch: outcome.sourceBranch,
+          },
+        });
+      } catch {
+        // Lifecycle observability is best-effort.
+      }
 
       if (lifecycleResult.state === 'merged' || lifecycleResult.state === 'no-code-outcome') {
         this.deps.supervisor.completeTask(taskId);
